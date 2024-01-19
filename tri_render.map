@@ -1,0 +1,236 @@
+Modules list:
+-------------
+controller.o:
+    CODE              Offs=000000  Size=000028  Align=00001  Fill=0000
+    ZEROPAGE          Offs=000000  Size=000003  Align=00001  Fill=0000
+header.o:
+    HEADER            Offs=000000  Size=000010  Align=00001  Fill=0000
+irq.o:
+    CODE              Offs=000028  Size=000003  Align=00001  Fill=0000
+    ZEROPAGE          Offs=000003  Size=000002  Align=00001  Fill=0000
+nmi.o:
+    CODE              Offs=00002B  Size=00004D  Align=00001  Fill=0000
+    ZEROPAGE          Offs=000005  Size=000007  Align=00001  Fill=0000
+    OAM               Offs=000000  Size=000100  Align=00001  Fill=0000
+    STACK             Offs=000000  Size=0000A0  Align=00001  Fill=0000
+rst.o:
+    RST_STUB          Offs=000000  Size=000039  Align=00001  Fill=0000
+vectors.o:
+    VECTORS           Offs=000000  Size=000006  Align=00001  Fill=0000
+main.o:
+    CODE              Offs=000078  Size=00057F  Align=00001  Fill=0000
+    SAVERAM           Offs=000000  Size=000020  Align=00001  Fill=0000
+math.o:
+    CODE              Offs=0005F7  Size=000145  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=001800  Align=00100  Fill=0000
+    ZEROPAGE          Offs=00000C  Size=000032  Align=00001  Fill=0000
+objects.o:
+    BSS               Offs=000000  Size=0000B8  Align=00001  Fill=0000
+prng.o:
+    CODE              Offs=00073C  Size=00004F  Align=00001  Fill=0000
+    ZEROPAGE          Offs=00003E  Size=000004  Align=00001  Fill=0000
+render.o:
+    CODE              Offs=00078B  Size=00086F  Align=00001  Fill=0000
+    RODATA            Offs=001800  Size=00007B  Align=00001  Fill=0000
+    BSS               Offs=0000B8  Size=000232  Align=00001  Fill=0000
+    ZEROPAGE          Offs=000042  Size=000064  Align=00001  Fill=0000
+    SAVERAM           Offs=000020  Size=000FC0  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+HEADER                000000  00000F  000010  00001
+ZEROPAGE              000020  0000C5  0000A6  00001
+STACK                 000100  00019F  0000A0  00001
+OAM                   000200  0002FF  000100  00001
+BSS                   000300  0005E9  0002EA  00001
+SAVERAM               006000  006FDF  000FE0  00001
+CODE                  008000  008FF9  000FFA  00001
+RODATA                009000  00A87A  00187B  00100
+RST_STUB              00FF00  00FF38  000039  00001
+VECTORS               00FFFA  00FFFF  000006  00001
+
+
+Exports list by name:
+---------------------
+buttons_held              000020 RLZ    camera_pitch_hi           00008D RLZ    
+camera_pitch_lo           00008C RLZ    camera_pos_x_hi           000089 RLZ    
+camera_pos_x_lo           000086 RLZ    camera_pos_x_sub          000083 RLZ    
+camera_pos_y_hi           00008A RLZ    camera_pos_y_lo           000087 RLZ    
+camera_pos_y_sub          000084 RLZ    camera_pos_z_hi           00008B RLZ    
+camera_pos_z_lo           000088 RLZ    camera_pos_z_sub          000085 RLZ    
+camera_roll_hi            000091 RLZ    camera_roll_lo            000090 RLZ    
+camera_yaw_hi             00008F RLZ    camera_yaw_lo             00008E RLZ    
+clear_oam                 008063 RLA    ecos                      009700 RLA    
+esin                      009300 RLA    fast_mul_sq1_hi_ptr       00002E RLZ    
+fast_mul_sq1_lo_ptr       00002C RLZ    fast_mul_sq2_hi_ptr       000032 RLZ    
+fast_mul_sq2_lo_ptr       000030 RLZ    hsin                      009100 RLA    
+irq                       008028 RLA    math_init                 0085F7 RLA    
+mul_16x8bit_signed        008634 RLA    mul_sq1_hi_ptr_0          00003C RLZ    
+mul_sq1_lo_ptr_0          000034 RLZ    mul_sq2_hi_ptr_0          00004C RLZ    
+mul_sq2_lo_ptr_0          000044 RLZ    nmi                       00802B RLA    
+oam                       000200 RLA    oam_index                 00002B RLZ    
+object_pos_x_hi           000320 RLA    object_pos_x_lo           000318 RLA    
+object_pos_x_sub          000310 RLA    object_pos_y_hi           000338 RLA    
+object_pos_y_lo           000330 RLA    object_pos_y_sub          000328 RLA    
+object_pos_z_hi           000350 RLA    object_pos_z_lo           000348 RLA    
+object_pos_z_sub          000340 RLA    post_reset                008078 RLA    
+qcos                      009600 RLA    qsin                      009200 RLA    
+read_controller           008000 RLA    reciprocal_16bit_signed_hi 00A700 RLA    
+reciprocal_16bit_signed_lo 00A600 RLA    reciprocal_lo             00A500 RLA    
+render_frame              00878B RLA    rst                       00FF00 RLA    
+set_mul_16x8bit_signed    00861A RLA    soft_ppuctrl              000025 RLZ    
+soft_ppumask              000026 RLZ    wait_for_nmi              00805C RLA    
+
+
+
+Exports list by value:
+----------------------
+buttons_held              000020 RLZ    soft_ppuctrl              000025 RLZ    
+soft_ppumask              000026 RLZ    oam_index                 00002B RLZ    
+fast_mul_sq1_lo_ptr       00002C RLZ    fast_mul_sq1_hi_ptr       00002E RLZ    
+fast_mul_sq2_lo_ptr       000030 RLZ    fast_mul_sq2_hi_ptr       000032 RLZ    
+mul_sq1_lo_ptr_0          000034 RLZ    mul_sq1_hi_ptr_0          00003C RLZ    
+mul_sq2_lo_ptr_0          000044 RLZ    mul_sq2_hi_ptr_0          00004C RLZ    
+camera_pos_x_sub          000083 RLZ    camera_pos_y_sub          000084 RLZ    
+camera_pos_z_sub          000085 RLZ    camera_pos_x_lo           000086 RLZ    
+camera_pos_y_lo           000087 RLZ    camera_pos_z_lo           000088 RLZ    
+camera_pos_x_hi           000089 RLZ    camera_pos_y_hi           00008A RLZ    
+camera_pos_z_hi           00008B RLZ    camera_pitch_lo           00008C RLZ    
+camera_pitch_hi           00008D RLZ    camera_yaw_lo             00008E RLZ    
+camera_yaw_hi             00008F RLZ    camera_roll_lo            000090 RLZ    
+camera_roll_hi            000091 RLZ    oam                       000200 RLA    
+object_pos_x_sub          000310 RLA    object_pos_x_lo           000318 RLA    
+object_pos_x_hi           000320 RLA    object_pos_y_sub          000328 RLA    
+object_pos_y_lo           000330 RLA    object_pos_y_hi           000338 RLA    
+object_pos_z_sub          000340 RLA    object_pos_z_lo           000348 RLA    
+object_pos_z_hi           000350 RLA    read_controller           008000 RLA    
+irq                       008028 RLA    nmi                       00802B RLA    
+wait_for_nmi              00805C RLA    clear_oam                 008063 RLA    
+post_reset                008078 RLA    math_init                 0085F7 RLA    
+set_mul_16x8bit_signed    00861A RLA    mul_16x8bit_signed        008634 RLA    
+render_frame              00878B RLA    hsin                      009100 RLA    
+qsin                      009200 RLA    esin                      009300 RLA    
+qcos                      009600 RLA    ecos                      009700 RLA    
+reciprocal_lo             00A500 RLA    reciprocal_16bit_signed_lo 00A600 RLA    
+reciprocal_16bit_signed_hi 00A700 RLA    rst                       00FF00 RLA    
+
+
+
+Imports list:
+-------------
+buttons_held (controller.o):
+    main.o                    ./src/includes/controller.h(9)
+camera_pitch_hi (render.o):
+    main.o                    ./src/includes/render.h(72)
+camera_pitch_lo (render.o):
+    main.o                    ./src/includes/render.h(72)
+camera_pos_x_hi (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_x_lo (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_x_sub (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_y_hi (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_y_lo (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_y_sub (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_z_hi (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_z_lo (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_pos_z_sub (render.o):
+    main.o                    ./src/includes/render.h(73)
+camera_roll_hi (render.o):
+    main.o                    ./src/includes/render.h(72)
+camera_roll_lo (render.o):
+    main.o                    ./src/includes/render.h(72)
+camera_yaw_hi (render.o):
+    main.o                    ./src/includes/render.h(72)
+camera_yaw_lo (render.o):
+    main.o                    ./src/includes/render.h(72)
+clear_oam (nmi.o):
+    render.o                  ./src/includes/nmi.h(17)
+ecos (math.o):
+    render.o                  ./src/includes/math.h(61)
+esin (math.o):
+    render.o                  ./src/includes/math.h(61)
+fast_mul_sq1_hi_ptr (math.o):
+    render.o                  ./src/includes/math.h(45)
+fast_mul_sq1_lo_ptr (math.o):
+    render.o                  ./src/includes/math.h(45)
+fast_mul_sq2_hi_ptr (math.o):
+    render.o                  ./src/includes/math.h(45)
+fast_mul_sq2_lo_ptr (math.o):
+    render.o                  ./src/includes/math.h(45)
+hsin (math.o):
+    render.o                  ./src/includes/math.h(61)
+irq (irq.o):
+    vectors.o                 ./src/includes/irq.h(5)
+math_init (math.o):
+    main.o                    ./src/includes/math.h(58)
+mul_16x8bit_signed (math.o):
+    render.o                  ./src/includes/math.h(49)
+mul_sq1_hi_ptr_0 (math.o):
+    render.o                  ./src/includes/math.h(46)
+mul_sq1_lo_ptr_0 (math.o):
+    render.o                  ./src/includes/math.h(46)
+mul_sq2_hi_ptr_0 (math.o):
+    render.o                  ./src/includes/math.h(46)
+mul_sq2_lo_ptr_0 (math.o):
+    render.o                  ./src/includes/math.h(46)
+nmi (nmi.o):
+    vectors.o                 ./src/includes/nmi.h(5)
+oam (nmi.o):
+    render.o                  ./src/includes/nmi.h(24)
+oam_index (nmi.o):
+    render.o                  ./src/includes/nmi.h(23)
+object_pos_x_hi (objects.o):
+    render.o                  ./src/includes/objects.h(12)
+object_pos_x_lo (objects.o):
+    render.o                  ./src/includes/objects.h(11)
+object_pos_x_sub (objects.o):
+    render.o                  ./src/includes/objects.h(10)
+object_pos_y_hi (objects.o):
+    render.o                  ./src/includes/objects.h(15)
+object_pos_y_lo (objects.o):
+    render.o                  ./src/includes/objects.h(14)
+object_pos_y_sub (objects.o):
+    render.o                  ./src/includes/objects.h(13)
+object_pos_z_hi (objects.o):
+    render.o                  ./src/includes/objects.h(18)
+object_pos_z_lo (objects.o):
+    render.o                  ./src/includes/objects.h(17)
+object_pos_z_sub (objects.o):
+    render.o                  ./src/includes/objects.h(16)
+post_reset (main.o):
+    rst.o                     src/interrupts/rst.asm(5)
+qcos (math.o):
+    render.o                  ./src/includes/math.h(61)
+qsin (math.o):
+    render.o                  ./src/includes/math.h(61)
+read_controller (controller.o):
+    main.o                    ./src/includes/controller.h(6)
+reciprocal_16bit_signed_hi (math.o):
+    render.o                  ./src/includes/math.h(67)
+reciprocal_16bit_signed_lo (math.o):
+    render.o                  ./src/includes/math.h(67)
+reciprocal_lo (math.o):
+    render.o                  ./src/includes/math.h(70)
+render_frame (render.o):
+    main.o                    ./src/includes/render.h(69)
+rst (rst.o):
+    vectors.o                 ./src/includes/rst.h(5)
+set_mul_16x8bit_signed (math.o):
+    render.o                  ./src/includes/math.h(49)
+soft_ppuctrl (nmi.o):
+    main.o                    ./src/includes/nmi.h(20)
+soft_ppumask (nmi.o):
+    main.o                    ./src/includes/nmi.h(20)
+wait_for_nmi (nmi.o):
+    main.o                    ./src/includes/nmi.h(11)
+

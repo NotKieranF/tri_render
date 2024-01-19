@@ -1,0 +1,62 @@
+Tri rendering pathway:
+	Project Point:
+
+	Render Object:
+
+	Render Poly:
+
+	Clip Poly:
+
+	Rasterize Poly:
+
+	Update Tile:
+		Takes: Lo bitplane, hi bitplane, alpha bitplane, x pos, y pos
+		update_tile(char x, char y, char[8] lo_plane, char[8] hi_plane, char[8] alpha) {
+			int index = x + y * SCREEN_WIDTH_TILES;
+
+			// Check
+			if (nametable[index] == BLANK) {
+				tile_id = max_tile
+				max_tile++
+
+				for (int i = 0; i < 8; i++) {
+					// In reality, these might be parallel arrays
+					screen_lo_plane[tile_id + i] = lo_plane[i]
+					screen_hi_plane[tile_id + i] = hi_plane[i]
+					screen_alpha[tile_id + i] = alpha[i]
+				}
+			} else {
+				tile_id = nametable[index]
+				
+				for (int i = 0; i < 8; i++) {
+					// In reality, these might be parallel arrays
+					screen_lo_plane[tile_id + i] |= lo_plane[i] & screen_alpha[index + i]
+					screen_hi_plane[tile_id + i] |= hi_plane[i] & screen_alpha[index + i]
+					screen_alpha[tile_id + i] |= alpha[i]
+				}
+			}
+		}
+
+		.PROC update_tile
+			lo_plane
+			hi_plane
+			alpha
+			ptr := $00
+			
+		compute_index:
+			LDA #<nametable
+			CLC
+			ADC table_1, X
+			STA ptr + 0
+			LDA #>nametable
+			ADC table_2, X
+			STA ptr + 1
+
+		get_tile:
+			LDA (ptr), Y
+			BNE not_blank
+		blank:
+			
+
+		not_blank:
+		.ENDPROC

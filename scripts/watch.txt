@@ -1,0 +1,10 @@
+[bres_current_x], U
+[bres_target_x], U
+[bres_current_y], U
+[bres_target_y], U
+[bres_dx], U
+[bres_dy], U
+[bres_hdx], S
+[bres_hdy], S
+[bres_error_lo]+[bres_error_hi]*256, S2
+[bres_sx], U

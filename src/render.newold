@@ -1,0 +1,160 @@
+MAX_TILES	= 128
+
+
+.SEGMENT	"SAVERAM"
+name_buffer:			.RES 1024
+pattern_buffer_0:		.RES MAX_TILES
+pattern_buffer_1:		.RES MAX_TILES
+pattern_buffer_2:		.RES MAX_TILES
+pattern_buffer_3:		.RES MAX_TILES
+pattern_buffer_4:		.RES MAX_TILES
+pattern_buffer_5:		.RES MAX_TILES
+pattern_buffer_6:		.RES MAX_TILES
+pattern_buffer_7:		.RES MAX_TILES
+pattern_buffer_8:		.RES MAX_TILES
+pattern_buffer_9:		.RES MAX_TILES
+pattern_buffer_10:		.RES MAX_TILES
+pattern_buffer_11:		.RES MAX_TILES
+pattern_buffer_12:		.RES MAX_TILES
+pattern_buffer_13:		.RES MAX_TILES
+pattern_buffer_14:		.RES MAX_TILES
+pattern_buffer_15:		.RES MAX_TILES
+
+
+
+
+
+
+
+
+
+
+.PROC	draw_poly_filled
+
+.PUSHSEG
+.ZEROPAGE
+poly_ptr:			.RES 2
+
+bres_routine_l:		.RES 2
+bres_vertex_l:		.RES 1
+bres_current_x_l:	.RES 1
+bres_current_y_l:	.RES 1
+bres_target_x_l:	.RES 1
+bres_target_y_l:	.RES 1
+bres_slope_l:		.RES 1
+bres_error_l:		.RES 1
+
+fill_left_buffer:	.RES 8
+fill_right_buffer:	.RES 8
+.POPSEG
+
+	.PROC	setup_bresenham_l
+		LDY bres_vertex_l
+		LDA (poly_ptr), Y
+		STA bres_target_y_l
+
+		SEC
+		SBC bres_current_y_l
+		BCS @pos
+	@neg:
+
+	.ENDPROC
+
+	; Steps left-hand lines in the shallow left octant
+	.PROC	step_bresenham_wsw_l
+		LDX bres_current_x_l
+		LDY bres_current_y_l
+		LDA bres_error_l
+		CLC
+	loop:
+		ADC bres_slope_l
+		BCS exit
+		DEX
+		CPX bres_target_x_l
+		BNE loop
+		RTS
+
+	exit:
+		INY
+		RTS
+	.ENDPROC
+
+	; Steps left-hand lines in the steep left octant
+	.PROC	step_bresenham_ssw_l
+
+	.ENDPROC
+
+	; Steps left-hand lines in the steep right octant
+	.PROC	step_bresenham_sse_l
+		LDX bres_current_x_l
+		LDA bres_error_l
+		CLC
+	loop:
+		ADC bres_slope_l
+		BCC :+
+		INX
+		CLC
+
+	:	INY
+		CPY bres_target_y
+		BNE loop
+	.ENDPROC
+
+	; Steps left-hand lines in the shallow right octant
+	.PROC	step_bresenham_ese_l
+		LDX bres_current_x_l
+		LDA bres_error_l
+		CLC
+	loop:
+		ADC bres_slope_l
+		BCC :+
+		DEY
+		BMI exit
+		STX fill_left_buffer, Y
+		CLC
+
+	:	INX
+		CPX bres_target_x
+		BNE loop
+		JSR setup_bresenham_l
+		CLC
+		BCC loop
+
+	exit:
+		STX bres_current_x_l
+		STA bres_error_l
+		RTS
+	.ENDPROC
+
+
+	step_steep:
+		ADC bres_slope
+		BCC :+
+		CLC
+		INY
+		STX fill_left_buffer
+		INC * - 2
+		BNE :+
+		RTS
+	
+	:	INX
+		CPX bres_target_x
+		BNE step_steep
+		JSR setup_bresenham_l
+		CLC
+		BCC step_steep
+
+	step_shallow:
+		ADC bres_slope
+		BCC :+
+		CLC
+		INX
+	:	INY
+
+		CPY bres_target_y
+		BNE step_shallow
+		JSR setup_bresenham_l
+		CLC
+		BCC step_shallow
+
+.ENDPROC

@@ -1,0 +1,25 @@
+.IFNDEF	UNIVERSAL_H
+UNIVERSAL_H = 1
+
+.FEATURE	leading_dot_in_identifiers
+.MACPACK	longbranch
+.MACPACK	generic
+
+;.MACRO	.FUNC name
+;	name:
+;	.SCOPE
+;.ENDMAC
+;
+;.MACRO	.ENDFUNC
+;	.ENDSCOPE
+;.ENDMAC
+;
+;.MACRO	.PROTOTYPE name
+;	.SCOPE name
+;.ENDMAC
+;
+;.MACRO	.ENDPROTO
+;	.ENDSCOPE
+;.ENDMAC
+
+.ENDIF
