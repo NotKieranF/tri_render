@@ -49,7 +49,7 @@ MATH_H = 1
 .GLOBAL		set_mul_16x8bit_signed, mul_16x8bit_signed, set_mul_16x16bit_unsigned_hi16, mul_16x16bit_unsigned_hi16, set_mul_8x16bit_signed_hi16, mul_8x16bit_signed_hi16
 
 ; Division routines
-.GLOBAL		div_7x7bit_unsigned_fractional
+.GLOBAL		udiv_8x8bit_frac
 
 ; Reciprocal routine
 .GLOBAL		reciprocal_16bit_unsigned

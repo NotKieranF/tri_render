@@ -68,6 +68,9 @@ NEAR_PLANE					= $0100
 .GLOBAL		plot_point
 .GLOBAL		render_frame
 
+; For testing
+.GLOBAL		draw_line
+
 ;
 .GLOBALZP	camera_pitch_hi, camera_pitch_lo, camera_yaw_hi, camera_yaw_lo, camera_roll_hi, camera_roll_lo
 .GLOBALZP	camera_pos_x_sub, camera_pos_x_lo, camera_pos_x_hi, camera_pos_y_sub, camera_pos_y_lo, camera_pos_y_hi, camera_pos_z_sub, camera_pos_z_lo, camera_pos_z_hi

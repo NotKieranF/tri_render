@@ -1,5 +1,5 @@
-; Kieran Firkin
-; TODO: Credits (poly render nesdev thread, c-hacking math, elite website)
+; (c) Kieran Firkin
+; TODO: Credits (poly render nesdev thread, c-hacking math, elite website), Proper License
 .INCLUDE	"nes.h"
 .INCLUDE	"render.h"
 .INCLUDE	"nmi.h"
@@ -21,6 +21,19 @@
 ;		- Pros: Potentially faster? Can do work entirely within 8 bits of precision, instead of 16 (subtract mesh origin from clipping plane)
 ;				Can probably trivially accept and reject entire polygons if they lie a certain distance away from the clipping plane
 ;		- Cons: Have to work in 3 dimensions instead of 2, clipping against non-orthogonal planes; it becomes harder to utilize projected_vertex_cache
+;	* Rotation/orientation matrices give scaling effectively for free
+;		- Mesh scale can be applied at two different locations, either:
+;			- After the mesh and camera orientation matrices have been composed, which maintains as much precision for as long as possible, but requires an extra nine
+;			  multiplications by three factors per mesh per camera per frame
+;			- After orthonormalization, which only requires nine multiplications by three factors per orthonormilization step (probably once per frame), but reduces
+;			  the precision of the mesh orientation matrix, potentially causing unacceptable innacuracies during mesh rotations and furthur orthonormalization steps
+;			- Probably a third middling option where scaling is applied just before the mesh and camera orientation matrices are composed, reducing precision slightly
+;			  but also reducing the workload from a per mesh per camera per frame operation to just a per mesh per frame operation
+;		- Camera scale can be useful for PAR image correction, probably a good idea to have NTSC (1.143:1), PAL (1.386:1), 16x9 (1.524?:1), and custom options
+;		- Camera scale could also be useful for FOV effects by scaling depth. Will probably require a generalized frustum culling algorithm, compared to the optimized 90* version
+;		- Orientation matrices could be non-orthogonal for skewing effects, however this is probably not as useful or easy to implement as scaling
+;	* Storing orientation as a matrix a la elite is probably a better idea compared to using euler angles
+
 
 .ZEROPAGE
 display_list_indices:			.RES 32
@@ -52,10 +65,6 @@ camera_matrix:					.REPEAT NUM_CAMERAS
               					.ENDREPEAT
 object_matrix:					.TAG ROT_MATRIX
 combined_matrix:				.TAG ROT_MATRIX
-
-; Buffer for the current working tile
-tile_buffer:					.RES 16
-tile_buffer_alpha:				.RES 8						; 1 is transparent, 0 is opaque
 
 
 
@@ -1519,13 +1528,17 @@ inner_loop:
 ;	Clobbers: A, X, Y, $00 - $1F
 .IF 0
 .PROC	rasterize_poly
-	left_edges		:= $00 ; Through $07
-	right_edges		:= $08 ; Through $0F
-	topmost_px		:= $1A
-	bottommost_px	:= $1B
-	leftmost_px		:= $1C
-	rightmost_px	:= $1D
-	poly_ptr		:= $1E	; And $1F
+	topmost_px					:= $1A
+	bottommost_px				:= $1B
+	leftmost_px					:= $1C
+	rightmost_px				:= $1D
+	fill_color_lo_ptr:			:= $12	; And $13
+	fill_color_hi_ptr:			:= $14	; And $15
+	name_buffer_ptr				:= $16	; And $17
+	pattern_buffer_alpha_ptr:	:= $18	; And $19
+	pattern_buffer_lo_ptr:		:= $1A	; And $1B
+	pattern_buffer_hi_ptr:		:= $1C	; And $1D
+	poly_ptr					:= $1E	; And $1F
 
 ;	rasterizePoly(Poly* polyPtr) {
 ;		int bresTargetL;
@@ -1661,189 +1674,6 @@ read_vertex_right:
 	STY right_target_vertex
 
 
-
-
-
-
-
-
-
-
-
-	LDY #$00
-loop:
-	LDX left_edges, Y
-	LDA left_table, X
-	LDX right_edges, Y
-	AND right_table, X
-	STA tile_buffer, Y
-
-	LDA left_edges, Y
-	SEC
-	SBC #$08
-	BCS :+
-		LDA #$00
-:	STA left_edges, Y
-
-	LDA right_edges, Y
-	SEC
-	SBC #$08
-	BCS :+
-		LDA #$00
-:	STA right_edges, Y
-
-	INY
-	CPY #$08
-	BNE loop
-
-
-
-	LDY #$00
-loop:
-	LDA left_edges, Y
-	TAX
-	CPX #$08
-	BCC :+
-		LDX #$08
-		CLC
-:	SBC #$08 - 1
-	BCS :+
-		LDA #$00
-:	STA left_edges, Y
-	LDA left_table, X
-	PHA
-
-	LDA right_edges, Y
-	TAX
-	CPX #$08
-	BCC :+
-		LDX #$08
-		CLC
-:	SBC #$08 - 1
-	BCS :+
-		LDA #$00
-:	STA right_edges, Y
-	PLA
-	AND right_table, X
-	STA tile_buffer, Y
-
-	INY
-	CPY #$08
-	BNE loop
-
-
-
-	LDY #$00
-loop:
-	LDA left_edges, Y
-	SEC
-	SBC min_px
-	BCS :+
-		LDX #$00
-		BEQ :+++
-:	CMP #$08
-	BCC :+
-		LDA #$08
-:	TAX
-:	LDA left_table, X
-	PHA
-
-	LDA right_edges, Y
-	SEC
-	SBC min_px
-	BCS :+
-		LDX #$00
-		BEQ :+++
-:	CMP #$08
-	BCC :+
-		LDA #$08
-:	TAX
-:	PLA
-	AND right_table, X
-	STA tile_buffer, Y
-
-	INY
-	CPY #$08
-	BNE loop
-
-;
-	LDY #$00
-loop:
-	LDA left_edges, Y
-	CMP max_px
-	BCC :+
-		LDX #$08
-		BNE :+++
-:	SBC min_px
-	BCS :+
-		LDA #$00
-:	TAX
-	LDA left_table, X
-	PHA
-
-; ...
-
-	INY
-	CPY #$08
-	BNE loop
-
-	LDY #$00
-loop:
-	LDX left_edges, Y
-	CPX #$08
-	BCC :+
-		LDX #$08
-:	LDA left_table, X
-
-	LDX right_edges, Y
-	CPX #$08
-	BCC :+
-		LDX #$08
-:	AND right_table, X
-	STA tile_buffer, Y
-
-	INY
-	CPY #$08
-	BNE loop
-
-; Best, pretty sure
-; Functional
-; 70 cycles max, 62 cycles min, plus no cost outside of loop
-	LDY #$00
-	CLD
-loop:
-	LAX left_edges, Y
-	CPX #$08
-	BCC :+
-		LDX #$08
-		CLC
-:	SBC #$08 - 1
-	BCS :+
-		LDA #$00
-:	STA left_edges, Y
-	LDA left_table, X
-	PHA
-
-	LAX right_edges, Y
-	CPX #$08
-	BCC :+
-		LDX #$08
-		CLC
-:	SBC #$08 - 1
-	BCS :+
-		LDA #$00
-:	STA right_edges, Y
-	PLA
-	AND right_edges, X
-	CMP #$FF
-	BNE :+
-		SED
-:	STA tile_buffer, Y
-
-	INY
-	CPY #$08
-	BNE loop
-
 ; separate px and tile pos?
 ; 32/44 cycles best case, 79 cycles worst case
 ; left_encountered should hold $FF before we encounter the left edge, and $00 after
@@ -1880,6 +1710,85 @@ loop:
 
 ; Maybe better modified version
 ; Uses D flag instead of C or V because it needs to use abs, Y indexing for RMW instructions. Fortunately the side effects are negligable in this case
+; Also includes prelude nametable lookup
+get_tile_id:
+	LDA screen_lo, X
+	CLC
+	ADC #<name_buffer
+	STA name_buffer_ptr + 0
+
+	LDA screen_hi, X
+	ADC #>name_buffer
+	STA name_buffer_ptr + 1
+
+	LDA (name_buffer_ptr), Y
+	CMP #BLANK_TILE
+	BEQ not_occluded
+	BCC fully_occluded
+
+partially_occluded:
+	INC allocated_patterns
+	LDA allocated_patterns
+	STA (name_buffer_ptr), Y
+
+; pattern_buffer_alpha_ptr = pattern_buffer_alpha + tile * 8
+; pattern_buffer_lo_ptr = pattern_buffer + tile * 16 + 0
+; pattern_buffer_hi_ptr = pattern_buffer + tile * 16 + 8
+
+	LDA table_lo, X
+	STA pattern_buffer_lo_ptr + 0
+	CLC
+	ADC #$08
+	STA pattern_buffer_hi_ptr + 0
+	LDA table_hi, X
+	STA pattern_buffer_lo_ptr + 1
+	ADC #$00
+	STA pattern_buffer_hi_ptr + 1
+
+
+
+not_occluded:
+	SED
+	LDY #$07
+@loop:
+	LDA left_encountered, Y
+	BEQ :+
+	DCP left_edges_tile, Y
+	BNE :+
+		ISC left_encountered, Y
+		LDX left_edges_px
+		LDA left_table, X
+:	STA temp
+
+	LDA right_encountered, Y
+	BNE :+
+	DCP right_edges_tile, Y
+	BNE :+
+		DCP right_encountered, Y
+		LDX right_edges_px, Y
+		LDA right_table, X
+:	ORA temp
+
+@a:
+	STA (pattern_buffer_alpha_ptr), Y
+	EOR #$FF
+	BEQ :+
+		CLD
+:	TAX
+	AND (color_lo), Y
+	STA (pattern_buffer_lo_ptr), Y
+
+	TXA
+	AND (color_hi), Y
+	STA (pattern_buffer_hi_ptr), Y
+
+	DEY
+	BPL @loop
+
+
+
+
+
 	SED
 	LDY #$07
 loop:
@@ -1925,54 +1834,18 @@ loop:
 	DEY
 	BPL loop
 
-; Modified version that incorporates more than just generating the tile mask
-; Might not be as effective
-	CLC
-	LDX #$07
-loop:
-	LDA left_encountered, X
-	BEQ :+
-	DEC left_edges_tile, X
-	BNE :+
-		INC left_encountered, X
-		LDY left_edges_px, X
-		LDA left_table, Y
-:	STA temp
-
-	LDA right_encountered, X
-	BNE :+
-	DEC right_edges_tile, X
-	BNE :+
-		DEC right_encountered, X
-		LDY right_edges_px, X
-		LDA right_table, Y
-:	ORA temp
-
-	BNE :+
-		SEC
-:	STX temp
-	LDY temp
-	ORA (tile_alpha), Y
+; Non-updating version. 35 cycles
+	STA (pattern_buffer_alpha_ptr), Y
 	EOR #$FF
-	STA temp
-	AND (tile_color_lo_plane), Y
-	ORA (tile_lo_plane), Y
-	STA (tile_lo_plane), Y
+	BEQ :+
+		CLD
+:	TAX
+	AND (color_lo), Y
+	STA (pattern_buffer_lo_ptr), Y
 
-	LDA temp
-	AND (tile_color_hi_plane), Y
-	ORA (tile_hi_plane), Y
-	STA (tile_hi_plane), Y
-
-	LDA temp
-	ORA (tile_alpha), Y
-	STA (tile_alpha), Y
-
-	DEX
-	BPL loop
-
-
-
+	TXA
+	AND (color_hi), Y
+	STA (pattern_buffer_hi_ptr), Y
 
 ;	rasterizePoly (ScreenPoly* polyPtr) {
 ;		int topmostPx;
@@ -2003,78 +1876,138 @@ right_table:
 .ENDPROC
 .ENDIF
 
-.IF 0
-; Plots a tile to the pattern table buffer, updating the nametable buffer if needed
-;	May be more efficient to inline this later, if it's only called from rasteriez_poly
-;	Takes: Tile x pos in Y, tile Y pos in X, tile data in tile_buffer and tile_buffer_alpha
-;	Returns: Nothing, modifies pattern_buffer, pattern_buffer_alpha, allocated_patterns, and name_buffer directly
-;	Clobbers: A, X, Y, $1E - $1F
-.PROC	plot_tile
-	name_buffer_ptr		:= $1E	; And $1F
+;
+;	Takes:
+;	Returns:
+;	Clobbers:
+.PROC	draw_line
+	x0		:= $00
+	y0		:= $01
+	x1		:= $02
+	y1		:= $03
+	slope	:= $04
+	ptr		:= $05	; And $06
 
-get_tile_id:
-	LDA screen_lo, X
+compute_dx:
+	LDY #$00			; Preload bresenham routine ID for positive dx, positive dy, dx > dy
+	LDA x1
+	SEC
+	SBC x0
+;	BEQ bres_vert		; If dx = 0, we have a vertical line
+	BCS :+
+		EOR #$FF		; Negate dx if it's negative
+		ADC #$01		; assert(pscarry == 0)
+		LDY #$04		; Load bresenham routine ID for negative dx, positive dy, dx > dy
+:	TAX					; x = |dx|
+
+compute_dy:
+	LDA y1
+	SEC
+	SBC y0
+;	BEQ bres_horiz		; If dy = 0, we have a horizontal line
+	BCS :+
+		EOR #$FF		; Negate dy if it's negative
+		ADC #$01		; assert(pscarry == 0)
+		INY				; Increment bresenham routine ID by two to go from positive dy -> negative dy
+		INY
+:						; a = |dy|
+
+compute_slope:
+	CMP identity, X
+	BCC :+
+		STX slope		; Swap dx and dy if dx < dy
+		TAX
+		LDA slope
+		INY				; Increment bresenham routine ID by one to go from dx > dy -> dx < dy
+:	JSR udiv_8x8bit_frac
+	STX slope
+
+get_routine:
+	LDA bres_routine_table_lo, Y
+	STA ptr + 0
+	LDA bres_routine_table_hi, Y
+	STA ptr + 1
+
+	LDX x0
+	LDY y0
+	LDA #$80
 	CLC
-	ADC #<name_buffer
-	STA name_buffer_ptr + 0
+	JMP (ptr)
 
-	LDA screen_hi, X
-	ADC #>name_buffer
-	STA name_buffer_ptr + 1
-
-	LAX (name_buffer_ptr), Y
-	BEQ blank
-	JMP not_blank
-
-; If the tile at (x, y) is fully transparent, then we must allocate a new tile, update the tile at (x, y), and overwrite the contents of the newly allocated tile
-blank:
-	INC allocated_patterns
-	BEQ tile_overflow
-	LAX allocated_patterns
-	STA (name_buffer_ptr), Y
-	.REPEAT	8, i
-	; lo_plane
-		LDA tile_buffer + i + 0
-		STA pattern_buffer + i * RENDER_MAX_TILES + 0, X
-
-	; hi_plane
-		LDA tile_buffer + i + 8
-		STA pattern_buffer + i * RENDER_MAX_TILES + 8, X
-
-	; alpha
-		LDA tile_buffer_alpha + i
-		STA pattern_buffer_alpha + i * RENDER_MAX_TILES, X
-	.ENDREP
+; Draw a horizontal line
+bres_horiz:
+	LDX x0
+	LDY y0
+@loop:
+	STA $444F
+	INX
+	CPX x1
+	BNE @loop
 	RTS
 
-; Maybe have error reporting here?
-tile_overflow:
+; Draw a vertical line
+bres_vert:
+	LDX x0
+	LDY y0
+@loop:
+	STA $444F
+	INY
+	CPY y1
+	BNE @loop
 	RTS
 
-; If the tile at (x, y) is only partially transparent, then we must update the existing tile by masking off occluded pixels in the tile buffer using the 
-; existing tile's alpha, and ORing the result with the existing tile. As the alpha buffer is inverted, it must be ANDed instead.
-not_blank:
-	.REPEAT	8, i
-	; lo_plane
-		LDA tile_buffer + i + 0
-		AND pattern_buffer_alpha + i * RENDER_MAX_TILES, X
-		ORA pattern_buffer + i * RENDER_MAX_TILES + 0, X
-		STA pattern_buffer + i * RENDER_MAX_TILES + 0, X
+; Bresenham routines for the 8 different octants. Not sure if this mess of assembler directives is better than writing the individual routines out or not...
+.REPEAT	8, i
+	.PROC	.IDENT(.SPRINTF("bres_routine_%d", i))
+	@loop:
+		STA $444F
+		ADC slope			; assert(pscarry == 0)
+		BCC @no_increment_minor
 
-	; hi_plane
-		LDA tile_buffer + i + 8
-		AND pattern_buffer_alpha + i * RENDER_MAX_TILES, X
-		ORA pattern_buffer + i * RENDER_MAX_TILES + 8, X
-		STA pattern_buffer + i * RENDER_MAX_TILES + 8, X
+	@increment_minor:
+		; Move along the minor axis
+		.IF(i & %011 = %000)
+			INY
+		.ELSEIF(i & %011 = %010)
+			DEY
+		.ELSEIF(i & %101 = %001)
+			INX
+		.ELSEIF(i & %101 = %101)
+			DEX
+		.ENDIF
+		CLC
 
-	; alpha
-		LDA tile_buffer_alpha + i
-		AND pattern_buffer_alpha + i * RENDER_MAX_TILES, X
-		STA pattern_buffer_alpha + i * RENDER_MAX_TILES, X
-	.ENDREP
-	RTS
+	@no_increment_minor:
+		; Move along the major axis
+		.IF(i & %101 = %000)
+			INX
+		.ELSEIF(i & %101 = %100)
+			DEX
+		.ELSEIF(i & %011 = %001)
+			INY
+		.ELSEIF(i & %011 = %011)
+			DEY
+		.ENDIF
+		;
+		.IF(i & %001 = %000)
+			CPX x1
+		.ELSEIF(i & %001 = %001)
+			CPY y1
+		.ENDIF
+		BNE @loop
+		RTS
+	.ENDPROC
+.ENDREP
+
+bres_routine_table_lo:
+.LOBYTES	bres_routine_0, bres_routine_1, bres_routine_2, bres_routine_3
+.LOBYTES	bres_routine_4, bres_routine_5, bres_routine_6, bres_routine_7
+
+bres_routine_table_hi:
+.HIBYTES	bres_routine_0, bres_routine_1, bres_routine_2, bres_routine_3
+.HIBYTES	bres_routine_4, bres_routine_5, bres_routine_6, bres_routine_7
+
 .ENDPROC
-.ENDIF
 
 ; Plots a point on the screen
 ;	Takes: X position in A, and Y position in Y
