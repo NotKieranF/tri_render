@@ -2030,28 +2030,6 @@ bres_vert:
 	BNE @neg_loop
 	RTS
 
-; Draw a horizontal line
-bres_horiz:
-	LDX x0
-	LDY y0
-@loop:
-	STA $444F
-	INX
-	CPX x1
-	BNE @loop
-	RTS
-
-; Draw a vertical line
-bres_vert:
-	LDX x0
-	LDY y0
-@loop:
-	STA $444F
-	INY
-	CPY y1
-	BNE @loop
-	RTS
-
 ; Bresenham routines for the 8 different octants. Not sure if this mess of assembler directives is better than writing the individual routines out or not...
 .REPEAT	8, i
 	.PROC	.IDENT(.SPRINTF("bres_routine_%d", i))

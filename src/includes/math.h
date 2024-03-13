@@ -12,13 +12,23 @@ FAST_MUL_MAX = 80
 ;	Returns:
 ;	Clobbers: A
 .MACRO	SET_FAST_MUL instance
-	STA fast_mul_sq1_lo_ptr + 0 + 2 * instance
-	STA fast_mul_sq1_hi_ptr + 0 + 2 * instance
-	EOR #$FF
-	CLC
-	ADC #$01
-	STA fast_mul_sq2_lo_ptr + 0 + 2 * instance
-	STA fast_mul_sq2_hi_ptr + 0 + 2 * instance
+	.IF .BLANK(instance)
+		STA fast_mul_sq1_lo_ptr + 0
+		STA fast_mul_sq1_hi_ptr + 0
+		EOR #$FF
+		CLC
+		ADC #$01
+		STA fast_mul_sq2_lo_ptr + 0
+		STA fast_mul_sq2_hi_ptr + 0
+	.ELSE
+		STA fast_mul_sq1_lo_ptr + 0 + 2 * instance
+		STA fast_mul_sq1_hi_ptr + 0 + 2 * instance
+		EOR #$FF
+		CLC
+		ADC #$01
+		STA fast_mul_sq2_lo_ptr + 0 + 2 * instance
+		STA fast_mul_sq2_hi_ptr + 0 + 2 * instance
+	.ENDIF
 .ENDMAC
 
 ; Setup multiplier for inline fast mul hi
@@ -26,11 +36,19 @@ FAST_MUL_MAX = 80
 ;	Returns: 
 ;	Clobbers: A
 .MACRO	SET_FAST_MUL_HI instance
-	STA fast_mul_sq1_hi_ptr + 0 + 2 * instance
-	EOR #$FF
-	CLC
-	ADC #$01
-	STA fast_mul_sq2_hi_ptr + 0 + 2 * instance
+	.IF .BLANK(instance)
+		STA fast_mul_sq1_hi_ptr + 0
+		EOR #$FF
+		CLC
+		ADC #$01
+		STA fast_mul_sq2_hi_ptr + 0
+	.ELSE
+		STA fast_mul_sq1_hi_ptr + 0 + 2 * instance
+		EOR #$FF
+		CLC
+		ADC #$01
+		STA fast_mul_sq2_hi_ptr + 0 + 2 * instance
+	.ENDIF
 .ENDMAC
 
 ; Perform fast mul inline
@@ -57,9 +75,15 @@ FAST_MUL_MAX = 80
 ;	Returns: Hi byte of product in A
 ;	Clobbers: A
 .MACRO	FAST_MUL_HI instance
-	LDA (fast_mul_sq1_hi_ptr + 2 * instance), Y
-	SEC
-	SBC (fast_mul_sq2_hi_ptr + 2 * instance), Y
+	.IF .BLANK(instance)
+		LDA (fast_mul_sq1_hi_ptr), Y
+		SEC
+		SBC (fast_mul_sq2_hi_ptr), Y
+	.ELSE
+		LDA (fast_mul_sq1_hi_ptr + 2 * instance), Y
+		SEC
+		SBC (fast_mul_sq2_hi_ptr + 2 * instance), Y
+	.ENDIF
 .ENDMAC
 
 ; Fastmul pointers. Shouldn't be touched directly, only exported for inlining purposes
