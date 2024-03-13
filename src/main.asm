@@ -57,47 +57,163 @@ init_pattern:
 
 ; Testing
 .SCOPE
-	x0		:= $F0
-	y0		:= $F1
-	x1		:= $F2
-	y1		:= $F3
+;	x0		:= $F0
+;	y0		:= $F1
+;	x1		:= $F2
+;	y1		:= $F3
+;
+;	LDA #$80
+;	STA x0
+;	STA y0
+;	LDA #$C0
+;	STA x1
+;	STA y1
+;forever:
+;	LDA buttons_held
+;	BIT identity + BUTTON_LEFT
+;	BEQ :+
+;		DEC x1
+;:	BIT identity + BUTTON_RIGHT
+;	BEQ :+
+;		INC x1
+;:	BIT identity + BUTTON_UP
+;	BEQ :+
+;		DEC y1
+;:	BIT identity + BUTTON_DOWN
+;	BEQ :+
+;		INC y1
+;:	
+;	LDA x0
+;	STA $1C
+;	LDA y0
+;	STA $1D
+;	LDA x1
+;	STA $1E
+;	LDA y1
+;	STA $1F
+;	STA $4445
+;	JSR draw_line
+;	STA $4445
 
-	LDA #$80
-	STA x0
-	STA y0
-	LDA #$C0
-	STA x1
-	STA y1
+.PUSHSEG
+.RODATA
+test_poly:
+.BYTE	$04
+.BYTE	$80, $40
+.BYTE	$C0, $80
+.BYTE	$80, $C0
+.BYTE	$40, $80
+
+.POPSEG
+
 forever:
-	LDA buttons_held
-	BIT identity + BUTTON_LEFT
-	BEQ :+
-		DEC x1
-:	BIT identity + BUTTON_RIGHT
-	BEQ :+
-		INC x1
-:	BIT identity + BUTTON_UP
-	BEQ :+
-		DEC y1
-:	BIT identity + BUTTON_DOWN
-	BEQ :+
-		INC y1
-:	
-	LDA x0
+	LDA #<test_poly
 	STA $00
-	LDA y0
+	LDA #>test_poly
 	STA $01
-	LDA x1
-	STA $02
-	LDA y1
-	STA $03
-	JSR draw_line
+	JSR rasterize_poly
 
 	JSR wait_for_nmi
 	JSR read_controller
 	JMP forever
 .ENDSCOPE
 
+;	multiplier		:= $10
+;	multiplicand	:= $12
+;	product			:= $14
+;
+;test_mul_16x16bit_unsigned_hi:
+;	JSR math_init
+;	LDA #$00
+;	STA multiplier + 0
+;	STA multiplier + 1
+;	STA multiplicand + 0
+;	STA multiplicand + 1
+;@outer_loop:
+;	LDY multiplier + 0
+;	LDA multiplier + 1
+;	JSR set_mul_16x16bit_unsigned_hi16
+;@inner_loop:
+;	LDY multiplicand + 0
+;	LDA multiplicand + 1
+;	JSR mul_16x16bit_unsigned_hi16
+;	STA product + 0
+;	STY product + 1
+;	STA $4444
+;
+;	INC multiplicand + 0
+;	BNE @inner_loop
+;	INC multiplicand + 1
+;	BNE @inner_loop
+;
+;	LDA #<1013
+;	CLC
+;	ADC multiplier + 0
+;	STA multiplier + 0
+;	LDA #>1013
+;	ADC multiplier + 1
+;	STA multiplier + 1
+;
+;	LDA multiplier + 0
+;	BNE @outer_loop
+;	LDA multiplier + 1
+;	BNE @outer_loop
+
+;	multiplier		:= $10
+;	multiplicand	:= $11
+;	product			:= $13
+;
+;test_mul_8x16bit_signed_hi16:
+;	JSR math_init
+;	LDA #$00
+;	STA multiplier
+;	STA multiplicand + 0
+;	STA multiplicand + 1
+;@outer_loop:
+;	LDA multiplier
+;	JSR set_mul_8x16bit_signed_hi16
+;@inner_loop:
+;	LDY multiplicand + 0
+;	LDA multiplicand + 1
+;	JSR mul_8x16bit_signed_hi16
+;	STA product + 0
+;	STY product + 1
+;	STA $4444
+;
+;	INC multiplicand + 0
+;	BNE @inner_loop
+;	INC multiplicand + 1
+;	BNE @inner_loop
+;
+;	INC multiplier
+;	BNE @outer_loop
+
+;	dividend	:= $10
+;	divisor		:= $11
+;	quotient	:= $12
+;test_div_7x7bit_unsigned_fractional:
+;	LDA #$01
+;	STA divisor
+;	LDA #$00
+;	STA dividend
+;@loop:
+;	LDA dividend
+;	LDX divisor
+;	JSR div_7x7bit_unsigned_fractional
+;	STX quotient
+;	STX $4444
+;
+;	INC dividend
+;	LDA dividend
+;	CMP divisor
+;	BNE @loop
+;
+;	LDA #$00
+;	STA dividend
+;	INC divisor
+;	LDA divisor
+;	CMP #$80
+;	BNE @loop
 
 
 	JSR math_init

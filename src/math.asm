@@ -39,7 +39,7 @@
 ;	Takes: Matrix to setup in matrix
 ;	Returns: 
 ;	Clobbers: A, X, Y
-.PROC set_fast_matmul_3x3
+.PROC	set_fast_matmul_3x3
 	matrix				:= $00	; Through $08
 
 	LDX #.SIZEOF(MATRIX) - 1
@@ -65,12 +65,12 @@ loop:
 ;	Takes: Left hand matrix in matrix_a
 ;	Returns: Matrix product in matrix_a
 ;	Clobbers: A, X, Y
-.PROC fast_matmul_3x3_3x3_signed
+.PROC	fast_matmul_3x3_3x3_signed
 
 .ENDPROC
 
 ; Compute the matrix mul
-.PROC fast_matmul_3x3_3x1_signed
+.PROC	fast_matmul_3x3_3x1_signed
 	LDY input_x
 	LDA (fast_matmul_xx_sq1_ptr), Y
 	SEC

@@ -33,6 +33,10 @@
 ;		- Camera scale could also be useful for FOV effects by scaling depth. Will probably require a generalized frustum culling algorithm, compared to the optimized 90* version
 ;		- Orientation matrices could be non-orthogonal for skewing effects, however this is probably not as useful or easy to implement as scaling
 ;	* Storing orientation as a matrix a la elite is probably a better idea compared to using euler angles
+;		- Applying relative pitch and roll isn't too bad, should probably use https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula, though a pretty big 
+;		  improvement can be made by using the fact that we have convenient orthonormal vectors.
+;			- For rotating by angle a about the z axis: x' = x * cos(a) + y * sin(a), y' = y * cos(a) - x * sin(a). The subtraction for the latter equation is to 
+;			  compensate for the fact that cross(x, z) = y but cross(y, z) = -x. All told, each rotation should take 4 scalar multiplications and 2 vector additions
 
 
 .ZEROPAGE
@@ -1877,23 +1881,73 @@ right_table:
 .ENDIF
 
 ;
-;	Takes:
+;	Takes: Pointer to polygon struct in $00 - $01
 ;	Returns:
 ;	Clobbers:
+.PROC	rasterize_poly
+	poly_ptr	:= $00	; And $01
+	left_index	:= $02
+	right_index	:= $03
+	color		:= $04
+	x0			:= $1C
+	y0			:= $1D
+	x1			:= $1E
+	y1			:= $1F
+
+	LDY #$00
+	LDA (poly_ptr), Y
+	ASL
+	STA left_index
+
+	INY
+	LDA (poly_ptr), Y
+	STA x1
+	
+	INY
+	LDA (poly_ptr), Y
+	STA y1
+@loop:
+	LDA x1
+	STA x0
+	LDA y1
+	STA y0
+
+	INY
+	LDA (poly_ptr), Y
+	STA x1
+
+	INY
+	LDA (poly_ptr), Y
+	STA y1
+
+	STY right_index
+	JSR draw_line
+	LDY right_index
+
+	CPY left_index
+	BNE @loop
+
+	RTS
+.ENDPROC
+
+; Draws a line from (x0, y0) to (x1, y1) using bresenham's algorithm
+;	Takes: x0, y0, x1, y1 in $1C - $1F
+;	Returns: Nothing
+;	Clobbers: A, X, Y, $19 - $1F
 .PROC	draw_line
-	x0		:= $00
-	y0		:= $01
-	x1		:= $02
-	y1		:= $03
-	slope	:= $04
-	ptr		:= $05	; And $06
+	x0			:= $1C
+	y0			:= $1D
+	x1			:= $1E
+	y1			:= $1F
+	slope		:= $19
+	ptr			:= $1A	; And $1B
 
 compute_dx:
 	LDY #$00			; Preload bresenham routine ID for positive dx, positive dy, dx > dy
 	LDA x1
 	SEC
 	SBC x0
-;	BEQ bres_vert		; If dx = 0, we have a vertical line
+	BEQ bres_vert		; If dx = 0, we have a vertical line
 	BCS :+
 		EOR #$FF		; Negate dx if it's negative
 		ADC #$01		; assert(pscarry == 0)
@@ -1904,7 +1958,7 @@ compute_dy:
 	LDA y1
 	SEC
 	SBC y0
-;	BEQ bres_horiz		; If dy = 0, we have a horizontal line
+	BEQ bres_horiz		; If dy = 0, we have a horizontal line
 	BCS :+
 		EOR #$FF		; Negate dy if it's negative
 		ADC #$01		; assert(pscarry == 0)
@@ -1933,6 +1987,48 @@ get_routine:
 	LDA #$80
 	CLC
 	JMP (ptr)
+
+; Draw a horizontal line
+bres_horiz:
+	LDX x0
+	LDY y0
+	CPX x1
+	BCS @neg_loop
+
+@pos_loop:
+	STA $444F
+	INX
+	CPX x1
+	BNE @pos_loop
+	RTS
+
+@neg_loop:
+	STA $444F
+	DEX
+	CPX x1
+	BNE @neg_loop
+	RTS
+
+; Draw a vertical line
+bres_vert:
+	LDX x0
+	LDY y0
+	CPY y1
+	BCS @neg_loop
+
+@pos_loop:
+	STA $444F
+	INY
+	CPY y1
+	BNE @pos_loop
+	RTS
+
+@neg_loop:
+	STA $444F
+	DEY
+	CPY y1
+	BNE @neg_loop
+	RTS
 
 ; Draw a horizontal line
 bres_horiz:

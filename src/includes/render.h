@@ -69,7 +69,7 @@ NEAR_PLANE					= $0100
 .GLOBAL		render_frame
 
 ; For testing
-.GLOBAL		draw_line
+.GLOBAL		draw_line, rasterize_poly
 
 ;
 .GLOBALZP	camera_pitch_hi, camera_pitch_lo, camera_yaw_hi, camera_yaw_lo, camera_roll_hi, camera_roll_lo

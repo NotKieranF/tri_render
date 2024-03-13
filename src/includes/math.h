@@ -1,22 +1,43 @@
 .IFNDEF	MATH_H
 MATH_H = 1
 
-; Setup multiplier for fast mul inline
-; Takes multiplier in A
-.MACRO	SET_FAST_MUL
-	STA fast_mul_sq1_lo_ptr + 0
-	STA fast_mul_sq1_hi_ptr + 0
+; Number of individual fast mul pointers
+FAST_MUL_HI_INSTANCES = 10
+FAST_MUL_INSTANCES = 1
+FAST_MUL_MIN = -80
+FAST_MUL_MAX = 80
+
+; Setup multiplier for inline fast mul
+;	Takes: multiplier in A, instance as first macro parameter
+;	Returns:
+;	Clobbers: A
+.MACRO	SET_FAST_MUL instance
+	STA fast_mul_sq1_lo_ptr + 0 + 2 * instance
+	STA fast_mul_sq1_hi_ptr + 0 + 2 * instance
 	EOR #$FF
 	CLC
 	ADC #$01
-	STA fast_mul_sq2_lo_ptr + 0
-	STA fast_mul_sq2_hi_ptr + 0
+	STA fast_mul_sq2_lo_ptr + 0 + 2 * instance
+	STA fast_mul_sq2_hi_ptr + 0 + 2 * instance
+.ENDMAC
+
+; Setup multiplier for inline fast mul hi
+;	Takes: multiplier in A, instance as first macro parameter
+;	Returns: 
+;	Clobbers: A
+.MACRO	SET_FAST_MUL_HI instance
+	STA fast_mul_sq1_hi_ptr + 0 + 2 * instance
+	EOR #$FF
+	CLC
+	ADC #$01
+	STA fast_mul_sq2_hi_ptr + 0 + 2 * instance
 .ENDMAC
 
 ; Perform fast mul inline
-; Takes multiplicand in Y
-; Returns hi byte of product in A
-; Stores lo byte of product at {product_lo} if specified, otherwise returns it in X
+;	Takes: multiplicand in Y
+;	Returns hi byte of product in A
+;	Clobbers: A, X
+;	Stores lo byte of product at {product_lo} if specified, otherwise returns it in X
 .MACRO	FAST_MUL product_lo
 	LDA (fast_mul_sq1_lo_ptr), Y
 	SEC
@@ -35,10 +56,10 @@ MATH_H = 1
 ;	Takes: Signed multiplicand in Y
 ;	Returns: Hi byte of product in A
 ;	Clobbers: A
-.MACRO	FAST_MUL_HI
-	LDA (fast_mul_sq1_hi_ptr), Y
+.MACRO	FAST_MUL_HI instance
+	LDA (fast_mul_sq1_hi_ptr + 2 * instance), Y
 	SEC
-	SBC (fast_mul_sq2_hi_ptr), Y
+	SBC (fast_mul_sq2_hi_ptr + 2 * instance), Y
 .ENDMAC
 
 ; Fastmul pointers. Shouldn't be touched directly, only exported for inlining purposes
