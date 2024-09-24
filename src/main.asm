@@ -98,11 +98,12 @@ init_pattern:
 .PUSHSEG
 .RODATA
 test_poly:
-.BYTE	$04
+.BYTE	$09
+.BYTE	$00
 .BYTE	$80, $40
 .BYTE	$C0, $80
 .BYTE	$80, $C0
-.BYTE	$40, $80
+.BYTE	$20, $80
 
 .POPSEG
 

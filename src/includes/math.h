@@ -13,6 +13,7 @@ FAST_MUL_MAX = 80
 ;	Clobbers: A
 .MACRO	SET_FAST_MUL instance
 	.IF .BLANK(instance)
+		.WARNING "Defaulting to first FAST_MUL instance!"
 		STA fast_mul_sq1_lo_ptr + 0
 		STA fast_mul_sq1_hi_ptr + 0
 		EOR #$FF
@@ -37,6 +38,7 @@ FAST_MUL_MAX = 80
 ;	Clobbers: A
 .MACRO	SET_FAST_MUL_HI instance
 	.IF .BLANK(instance)
+		.WARNING "Defaulting to first FAST_MUL instance!"
 		STA fast_mul_sq1_hi_ptr + 0
 		EOR #$FF
 		CLC
@@ -76,6 +78,7 @@ FAST_MUL_MAX = 80
 ;	Clobbers: A
 .MACRO	FAST_MUL_HI instance
 	.IF .BLANK(instance)
+		.WARNING "Defaulting to first FAST_MUL instance!"
 		LDA (fast_mul_sq1_hi_ptr), Y
 		SEC
 		SBC (fast_mul_sq2_hi_ptr), Y

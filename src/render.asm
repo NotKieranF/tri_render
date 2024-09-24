@@ -6,6 +6,9 @@
 .INCLUDE	"math.h"
 .INCLUDE	"objects.h"
 
+; Overview of rendering pipeline:
+;	* 
+
 ; Ideas:
 ;	* Clip against near plane while iterating through vertices when rendering each polygon, instead of rendering to a buffer first
 ;	* Cache projected vertex positions
@@ -37,11 +40,140 @@
 ;		  improvement can be made by using the fact that we have convenient orthonormal vectors.
 ;			- For rotating by angle a about the z axis: x' = x * cos(a) + y * sin(a), y' = y * cos(a) - x * sin(a). The subtraction for the latter equation is to 
 ;			  compensate for the fact that cross(x, z) = y but cross(y, z) = -x. All told, each rotation should take 4 scalar multiplications and 2 vector additions
+;	* When doing back face culling, we need to compute the dot product between the surface normal and the line-of-sight vector between the camera and a point that is 
+;	  coplanar to the face.
+;		- Elite does something clever, where the surface normal is scaled in such a way that it also represents a point coplanar to the face, allowing them to 
+;		  accept/reject faces without pushing more than one vector through the transformation matrix. This has two caveats: surface normals are no longer normalized, 
+;		  and so lighting effects would require renormalization; and this technique imposes certain geometric limitations on models.
+;		- An alternative option is to store a normalized surface normal, and use the face barycenter as the point on the surface. This solves the renormalization 
+;		  issue, and is equally performant when a face is accepted - as the barycenter needs to be transformed regardless for sorting purposes - but results in an 
+;		  extra transformation when a face is rejected.
+;		- Another, better alternative is to instead use the first vertex in the face as the point on the surface. This performs just as well when a face is accepted, 
+;		  but allows for the result to be cached and used again when a face is rejected. By structuring the mesh in such a way to minimize the number of distinct 
+;		  first vertices, we can reduce the total performance hit.
+;			- In particular, we should structure the mesh so that faces that share a first vertex are stored consecutively. The entire facing vector can then be
+;			  cached for the current vertex block, requiring only four bytes: three for the vector, and one for the vertex index corresponding to the current vertex
+;			  block.
+;	* Maybe use LU factorization for applying transformation matrix to points? - No
+;	* Probably need to compute inverse of camera matrix
+;	* Can easily extend fast reciprocal used in projection to work with values less than 256 by adding an additional lookup table specifically for them
+;		- Not clear how easily those values could be actually projected though
+;	* For rendering distance stars as points, we want to be able to cull them as soon as possible as converting them into cameraspace coordinates is likely the most 
+;	  taxing part of their rendering. To do this, we can determine which octant the view vector of the camera is in, and immediately discard all stars in the opposing
+;	  octant.
+;		- This can probably be extended by splitting each octant into sections based on the relative magnitudes of the x, y, and z coordinates, allowing us to reject
+;		  all areas which are not adjacent to the one housing the view vector.
+;		- Flickering stars every frame may also be a viable technique to reduce computational load. May not look good at lower frame rates.
+;		- Might be a good idea to scratch the octant comparison nonsense, and just take the dot product between the view vector and a pseudo-normalized vector from 
+;		  the camera to the star?
+;		- Could use some sort of hierarchical queue system to keep track of active and non-active stars
+;			- Active queue of stars that are checked and (probably) rendered every frame. Stars that aren't rendered get demoted to the inactive queue
+;			- Inactive queue of stars where each frame one (or more) are checked to see if they should be rendered and promoted to the active queue (visible),
+;			  promoted to the semi-active queue (dot product with view vector is positive), or recycled (dot product with view vector is negative).
+;			- Semi-active queue of stars where each frame one (or more) are checked to see if they should be rendered and promoted to the active queue (visible),
+;			  demoted to the inactive queue (dot product with view vector is negative), or recycled (dot product with view vector is positive).
+;			- This could also probably be applied to culling more than just stars? Though it's unlikely that enough objects will be able to be concurrently loaded to
+;			  make this worthwhile, not to mention it's not guaranteed that all objects will be rendered on the first frame they're visible
+;	* For projecting vertices into extended screen space, it should actually be possible to move the near clipping plane -- from Z = 256 to Z = 2 -- without risking
+;	  overflowing the 16-bit extended screen space coordinates, due to frustum culling at the mesh level. The most extreme extended screen space position for a given
+;	  vertex after frustum culling with a visibility radius of 80 * sqrt(2) is represented by (Z + 80 * sqrt(2) + 80) * 256 / Z for a given Z value -- which evaluates to
+;	  24977 at Z = 2, just within the -32768 - 32768 range, and decreases asymptotically at higher Z values.
+;		- Z = 3 is the cutoff for a visibility radius of 80 * sqrt(2) * sqrt(2) and a maximum vertex offset of 80 * sqrt(2), i.e. if we allow all possible vertex
+;		  positions within a meshes coordinate system, instead of restricting vertices to the sphere that is circumscribed by the meshes coordinate system.
+;		- In terms of implementation details, it would probably be best to first check for Z < 256, and then jump to a routine that uses a dedicated reciprocal lookup
+;		  table and performs a full 16.0-by-0.16-bit multiplication with 16.0 bit result, instead of the optimized 16.0-by-0.8-bit multiplication that the main path
+;		  performs.
+;	* For normalizing vectors, sqrt15 on https://github.com/TobyLobster/sqrt_test?tab=readme-ov-file is particularly fast, at a modest cost of 512 bytes. Additionally,
+;	  a similar technique can be directly applied directly to the inverse square root function: we first shift the input left two bits at a time until the hi byte is
+;	  within the range $40-$FF. We then use this hi byte as an index into an inverse square root table to produce an intermediate answer. Finally, we shift the
+;	  intermediate answer to the left as many times as we shifted the input, one bit at a time. This results in a final answer with < 5% error for input values greater
+;	  than ~80.
+;	* For remappable control schemes: keep an array of button combos in ram, with each index representing some remappable action. Action code can then check whether
+;	  the button combo in ram matches the current controller state.
+;		- Will probably be necessary to have two arrays, one for positive checks, one for negative checks
+;		- Will probably have to do some post-processing on controller mappings; e.g. if L+A maps to action one, and A maps to action two, then action two shouldn't 
+;		  activate when L+A are pressed--i.e. ~L+A maps to action two--but if A only maps to action two, then L shouldn't matter
+;			- For each action map, iterate through all other action maps. If the current action map & the other action map = 0, then there are no conflicts and we 
+;			  can move on. Otherwise we XOR that intermediate value with the other action map. If that result is zero, then the other action map is a subeset of the 
+;			  current and we can also move on, Otherwise, we need to add the resulting buttons to our negative mapping.
+;			- In other words:
+;				LDX #$00
+;			@outer:
+;				LDY #$00
+;			@inner:
+;				LDA positive_action_map, X
+;				AND positive_action_map, Y
+;				BEQ :+
+;					EOR positive_action_map, Y
+;					BEQ :+
+;						ORA negative_action_map, X
+;						STA negative_action_map, X
+;			:	INY
+;				CPY #.sizeof(ACTIONS)
+;				BNE @inner
+;				INX
+;				CPX #.sizeof(ACTIONS)
+;				BNE @outer
+;		- For actions that work based on buttons_held, one must check that all buttons are held, i.e. (buttons_held & ACTION_MASK) ^ ACTION_MASK = 0
+;		- For actions that work based on buttons_down, one must check that all buttons are held, and that at least one button has been pressed this frame,
+;		  i.e. ((buttons_held & ACTION_MASK) ^ ACTION_MASK = 0) & (buttons_down & ACTION_MASK != 0)
+;		- For actions that work based on buttons_up, one must check that at least one button has been released this frame, and that the rest are held,
+;		  i.e. (((buttons_held | buttons_up) & ACTION_MASK) ^ ACTION_MASK = 0) & (buttons_up & ACTION_MASK != 0)
 
+; Mesh format outline:
+;	* Broken up generally into vertex list, face list, and line list, plus misc info like radius.
+;	* Vertex list is comprised of three parallel arrays, one for each vector component.
+;	* Face list is comprised of a face count value, followed by a sequence of face structs.
+;		- Face structs start with a normal vector, followed by vertex count and color info, followed by a sequence of vertex indices, followed by a barycenter.
+;	* Line list is comprised of a line count value, followed by a sequence of line structs.
+;		- Line structs start with vertex count and color info, followed by a sequence of vertex indices.
+
+; Temp note: Keep a count of the number of cycles we have left in extended vblank. Subtract the length of each prospective chunk of work (tile upload, nametable row 
+; upload, etc.) before executing. If result doesn't underflow, then store back modified value and execute chunk. Otherwise, this chunk cannot complete in the allotted
+; time and so we must start the cleanup process. Cleanup process involves waiting out the remaining extended vblank time before setting scroll and enabling rendering.
+; Note, it should only be necessary to wait to align with the next scanline boundary if we set the scroll properly. This is helpful to avoid wasting time on frames
+; with light vram transfer load.
+
+; Thread outline:
+;	Main upload thread:
+;		* Kicked off by DPCM IRQ, takes place after UI upload thread
+;		* Responsible for uploading main graphics buffer contents to PPU
+;		- Check if buffers have been populated
+;			- If not, return immediately
+;			- Otherwise...
+;		- Upload nametable buffer in its entirety
+;		- Upload opaque patterns
+;		- Indicate that the nametable and opaque pattern buffers have been consumed and so are safe to populate
+;		- Upload non-opaque patterns top-to-bottom, decrementing a counter to indicate to which tiles have been consumed and are safe to populate
+;		- Swap nametables and pattern tables PPU side to display new screen
+;
+;	Main thread:
+;		* Kicked off by RESET
+;		- Step game state
+;		- Build display list of clipped screen-space polygons and lines
+;		- Wait for main upload thread to indicate that it has consumed the nametable and opaque pattern buffers
+;			- Shouldn't need to wait on this condition all too often. If waiting here becomes an issue, it'd be possible to incorporate small chunks of work inbetween
+;			  checks (e.g. moving objects based on their speed, stepping enemy behaviours)
+;		- Rasterize display list, checking the main upload thread tile counter each time we allocate a new tile
+;
+;	UI thread:
+;		* Kicked off by DPCM IRQ, takes place after main upload thread
+;
+;	UI upload thread:
+;		* Kicked off by DPCM IRQ, takes place first
+;
+;	Music thread:
+;		* Kicked off by DPCM IRQ, takes place after UI thread
+;
+;	Frame counter thread:
+;		* Kicked off by NMI
+;		* Needs to take a constant time
 
 .ZEROPAGE
 display_list_indices:			.RES 32
 display_list_size:				.RES 1
+left_edges:						.RES 8				; Buffer containing the leftmost pixels of a tile row to be rasterized
+right_edges:					.RES 8				; Buffer containing the rightmost pixels of a tile row to be rasterized
 
 ; Camera parameters
 camera_pos_sub:
@@ -93,18 +225,21 @@ poly_buffer_next:				.RES POLY_MAX_VERTICES
 poly_buffer_first:				.RES 1
 poly_buffer_last:				.RES 1
 
+allocated_partial_patterns:		.RES 1
+allocated_opaque_patterns:		.RES 1
+
 
 
 
 
 .SEGMENT	"SAVERAM"
+.ALIGN	256
 ; Pattern table buffers
 pattern_buffer:					.RES RENDER_MAX_TILES * 16
 pattern_buffer_alpha:			.RES RENDER_MAX_TILES * 8	; 1 is transparent, 0 is opaque
-allocated_patterns:				.RES 1
 
 ; Nametable buffer
-name_buffer:					.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
+nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
 
 
 
@@ -1798,6 +1933,7 @@ not_occluded:
 loop:
 	LDA left_encountered, Y
 	BEQ :+
+	; This isn't safe --- I think it is actually
 	DCP left_edges_tile, Y
 	BNE :+
 		ISC left_encountered, Y
@@ -1881,53 +2017,559 @@ right_table:
 .ENDIF
 
 ;
-;	Takes: Pointer to polygon struct in $00 - $01
-;	Returns:
-;	Clobbers:
+;	Takes: Pointer to polygon struct in $00 - $01, with vertices stored in clockwise order, sorted such that the topmost vertex is first, preferring the leftmost 
+;		   vertex if ambiguous.
+;	Returns: Nothing
+;	Clobbers: A, X, Y, $00 - $1F
 .PROC	rasterize_poly
-	poly_ptr	:= $00	; And $01
-	left_index	:= $02
-	right_index	:= $03
-	color		:= $04
-	x0			:= $1C
-	y0			:= $1D
-	x1			:= $1E
-	y1			:= $1F
+	TILE_MASK					= %11111000
+	PIXEL_MASK					= %00000111
+
+	poly_ptr					:= $00	; And $01
+	left_index					:= $02
+	right_index					:= $03
+	poly_color					:= $04
+	poly_size					:= $05
+	leftmost_pixel				:= $06
+	rightmost_pixel				:= $07
+	tile_row					:= $08
+
+	bres_current_x_l			:= $09
+	bres_current_x_r			:= $0A
+	bres_current_y_l			:= $0B
+	bres_current_y_r			:= $0C
+	bres_target_x_l				:= $0D
+	bres_target_x_r				:= $0E
+	bres_target_y_l				:= $0F
+	bres_target_y_r				:= $10
+	bres_target_y_relative_l	:= $11
+	bres_target_y_relative_r	:= $12
+	bres_routine_ptr_l			:= $13	; And $14
+	bres_routine_ptr_r			:= $15	; And $16
+	bres_slope_l				:= $17
+	bres_slope_r				:= $18
+	bres_residual_l				:= $19
+	bres_residual_r				:= $1A
 
 	LDY #$00
+get_size:
 	LDA (poly_ptr), Y
-	ASL
+	STA poly_size
 	STA left_index
 
+get_color:
 	INY
 	LDA (poly_ptr), Y
-	STA x1
-	
-	INY
-	LDA (poly_ptr), Y
-	STA y1
-@loop:
-	LDA x1
-	STA x0
-	LDA y1
-	STA y0
+	STA poly_color
 
+get_x:
 	INY
 	LDA (poly_ptr), Y
-	STA x1
+	STA bres_current_x_l
+	STA bres_current_x_r
 
+get_y:
 	INY
-	LDA (poly_ptr), Y
-	STA y1
-
+	LAX (poly_ptr), Y
 	STY right_index
-	JSR draw_line
-	LDY right_index
+	STA bres_target_y_l
+	STA bres_target_y_r
+	ORA #TILE_MASK				; current_y = target_y % 8 - 8
+	STA bres_current_y_l
+	STA bres_current_y_r
+	AND #PIXEL_MASK
+	TAY							; Y now holds the number of blank rows above the tompost vertex
+	TXA
+	LSR
+	LSR
+	LSR
+	STA tile_row
 
-	CPY left_index
+prefill_edges:
+	LDA #$00					; Loop through unused entries of left_edges and right_edges and initialize them to opposite sides of the screen
+	LDX #$FF					; This ensures that upon rasterization, there are no pixels between left_edges[i] and right_edges[i] in an unused row i
+@loop:
+	DEY
+	BMI @exit
+	STA right_edges, Y			; right_edges should be initialized to the left side of the screen, i.e. $00
+	STX left_edges, Y			; left_edges should be initialized to the right side of the screen, i.e. $FF
 	BNE @loop
+@exit:	
+	STA rightmost_pixel			; Similarly, rightmost_pixel and leftmost_pixel need to be initialized to opposite sides of the screen
+	STX leftmost_pixel			; This ensures they are immediately reloaded when we start stepping along the left and right edges
 
+read_initial_vertices:
+	JSR read_vertex_right
+	BCS exit					; If first right vertex is at the same level as the topmost vertex, all points are colinear
+:	JSR read_vertex_left		; Keep reading vertices to the left until we find one that's below the current. We are guaranteed to find one as we've already 
+	BCS :-						; established the first right vertex is below the topmost vertex
+
+loop:
+	JSR rasterize_tile_row
+	INC tile_row
+
+	; Initialize leftmost_pixel and rightmost_pixel to ensure they're overwritten
+	LDX #$00
+	STX rightmost_pixel
+	DEX							; X = $FF
+	STX leftmost_pixel
+
+	JSR step_bres_right
+	BCS read_final_left_vertex	; If we've reached the bottom on the right side, i.e. C = 1, we must read step along the left side one last time before rasterization
+	JSR step_bres_left
+	BCS postfill_edges			;
+	JMP loop
+
+read_final_left_vertex:
+	JSR step_bres_left
+
+postfill_edges:
+	LDX bres_target_y_l
+	LDA #$00
+	LDY #$FF
+@loop:
+	INX
+	BEQ @exit
+	STA z:right_edges + $08, X
+	STY z:left_edges + $08, X	
+	BMI @loop
+@exit:
+
+final_row_rasterization:
+	JSR rasterize_tile_row
+
+exit:
 	RTS
+
+	; Cleans up after we've stepped through a whole tile
+	.PROC	bres_exit_left
+		STY bres_current_x_l
+		STA bres_residual_l
+		LDA #<-$08						; Reset index back to -8 for the next row
+		STA bres_current_y_l
+
+		CPY leftmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
+		BCC :+							; This check handles the last line
+			STY leftmost_pixel
+			CLC							; Indicate that we've completed a row in full with C = 0
+	:	RTS
+	.ENDPROC
+
+	; Bresenham routines for left traversal
+	.PROC	bres_routine_left_xp
+
+	.ENDPROC
+
+	.PROC	bres_routine_left_xn
+
+	.ENDPROC
+
+	.PROC	bres_routine_left_yp
+
+	.ENDPROC
+
+	.PROC	bres_routine_left_yn
+
+	.ENDPROC
+
+	.REPEAT 2, i
+		.IDENT(.SPRINTF("bres_routine_left_x%d", i)):
+		@loop:
+			CPY bres_target_x_l
+			BEQ read_vertex_left
+			.IF i = 0
+				INY
+			.ELSE
+				DEY
+			.ENDIF
+			CLC
+			ADC bres_slope_l
+			BCC @loop
+				STY left_edges + $08, X
+				INX
+				BNE @loop
+				BEQ bres_exit_left
+
+		.IDENT(.SPRINTF("bres_routine_left_y%d", i)):
+		@loop:
+			CPX bres_target_y_relative_l
+			BEQ read_vertex_left
+			CLC
+			ADC bres_slope_l
+			BCC :+
+			.IF	i = 0
+				INY
+			.ELSE
+				DEY
+			.ENDIF
+		:	STY left_edges + $08, X
+			INX
+			BNE @loop
+			BEQ bres_exit_left
+	.ENDREPEAT
+
+	; Reads a vertex from poly_ptr at left_index, and sets up left bresenham properties based the current position and the values read
+	; Note: Assumes that bres_target_x_l and bres_target_y_l represent the current position. Assumes that left index points to the final byte of the vertex, and 
+	;		leaves it pointing at the final byte of the next vertex in counterclockwise order
+	;	Takes:
+	;	Returns:
+	;	Clobbers: A, X, Y, $1F
+	.PROC	read_vertex_left
+		routine_index		:= $1F
+
+		LDY left_index
+	@get_y:
+		LAX (poly_ptr), Y
+		DEY
+		SEC
+		SBC bres_target_y_l				; Compute dy = target - current. N.B. this is the opposite of normal
+		BCC bottom						; If the target is at or above the current, i.e. dy <= 0, we've reached the bottom of the polygon and need to exit
+		BEQ bottom
+		STA bres_target_y_relative_l	; Reduced y position is relative to the current y position
+		STX bres_target_y_l
+
+	@get_x:
+		LAX (poly_ptr), Y
+		DEY
+	;	SEC								; assert(pscarry == 1)
+		SBC bres_current_x_l			; Compute dx = target - current. N.B. this is the opposite of normal
+		BCS :+
+			EOR #$FF					; Compute |dx| if dx < 0
+		;	CLC							; assert(pscarry == 0)
+			ADC #$01
+			CLC
+	:	ROL routine_index				; C = 1 if dx > 0, i.e. a negative traversal along the x axis
+		STX bres_target_x_l
+		STY left_index
+
+	@check_steepness:
+		LDX bres_target_y_relative_l	; Going in here: A = |dx|, X = |dy|
+		CMP bres_target_y_relative_l
+		BCC :+							; Swap A and X if dx > dy
+			TAX
+			LDA bres_target_y_relative_l
+	:	ROL routine_index				; C = 1 if dx < dy, i.e. the y axis is the major axis
+
+	@get_slope:
+		JSR udiv_8x8bit_frac
+		STX bres_slope_l
+
+	@set_residual:
+		LDA #$80
+		STA bres_residual_l
+
+	@get_routine:
+		LDA routine_index				; Bit 0 indicates the major axis, bit 1 indicates the traversal direction along the x axis
+		AND #%00000011					; Only the two lower order bits contain index information
+		TAX
+		LDA left_routine_table_lo, X
+		STA bres_routine_ptr_l + 0
+		LDA left_routine_table_hi, X
+		STA bres_routine_ptr_l + 1
+		JMP step_bres_left				; This may be able to be removed after a slight refactor, with execution falling straight through to step_bres_left
+
+	bottom:
+		SEC								; Indicate that we have not completed a row in full with C = 1
+		RTS								; Return to the original caller instead of continuing to step along the perimeter
+	.ENDPROC
+
+	; Initiates a step along the left edge
+	;	Takes:
+	;	Returns: C = 0 if a full row was processed, C = 1 if the bottom of the polygon was reached
+	;	Clobbers: A, X, Y, $1F
+	.PROC	step_bres_left
+		LAX bres_target_y_relative_l	; Subtract 8 from the relative target position as we've moved down a row since last iteration
+		AXS #$08						; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
+		STX bres_target_y_relative_l
+
+		LDX bres_current_y_l			; Load saved bresenham parameters
+		LDY bres_current_x_l
+		LDA bres_residual_l
+
+		CPY leftmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
+		BCC :+							; This check handles the first line, as well as lines with vertices, as this routine is called by read_vertex_left
+			STY leftmost_pixel
+
+	:	JMP (bres_routine_ptr_l)
+	.ENDPROC
+
+;	.REPEAT	4, i
+;		.IDENT(.SPRINTF("bres_routine_left_%d", i)):
+;		@loop:
+;			CLC
+;			ADC bres_slope_l
+;			BCC @increment_major
+;		@increment_minor:
+;			.IF	i .MOD 2 = 0				; Cases where Y is the minor axis
+;				STY z:left_edges + $08, X	; Uses negative indexing, i.e. zeropage wraparound
+;				INX
+;				BEQ bres_exit_left
+;			.ELSEIF i = 1					; Case where X is the minor axis and dx > 0
+;				DEY
+;			.ELSEIF	i = 3					; Case where X is the minor axis and dx < 0
+;				INY
+;			.ENDIF
+;		@increment_major:
+;		.IF i .MOD 2 = 1					; Cases where Y is the major axis
+;			STY z:left_edges + $08, X		; Uses negative indexing, i.e. zeropage wraparound
+;			INX
+;			BEQ bres_exit_left
+;			CPX bres_target_y_relative_l
+;		.ELSEIF	i = 0						; Case where X is the major axis and dx > 0
+;			DEY
+;			CPY bres_target_x_l
+;		.ELSEIF	i = 2						; Case where X is the major axis and dx < 0
+;			INY
+;			CPY bres_target_x_l
+;		.ENDIF
+;			BNE @loop
+;			JMP read_vertex_left
+;	.ENDREPEAT
+
+	; Reads a vertex from poly_ptr at right_index, and sets up right bresenham properties based the current position and the values read
+	; Note: Assumes that bres_target_x_r and bres_target_y_r represent the current position. Assumes that right index points to the last byte of the previous vertex, 
+	;		and leaves it pointing at the last byte of the current vertex
+	;	Takes:
+	;	Returns:
+	;	Clobbers: A, X, Y, $1E - $1F
+	.PROC	read_vertex_right
+		routine_index		:= $1F
+		dx					:= $1E
+
+		LDY right_index
+	@get_x:
+		INY
+		LAX (poly_ptr), Y
+		SEC
+		SBC bres_current_x_r			; Compute dx = target - current
+		BCS :+
+			EOR #$FF					; Compute |dx| if dx < 0
+		;	CLC							; assert(pscarry == 0)
+			ADC #$01
+			CLC
+	:	ROL routine_index				; C = 1 if dx > 0, i.e. a negative traversal along the x axis
+		STA dx
+		STX bres_target_x_r
+
+	@get_y:
+		INY
+		LAX (poly_ptr), Y
+		SEC
+		SBC bres_target_y_r				; Compute dy = target - current. N.B. this is the opposite of normal
+		BCC bottom						; If the target is at or above the current, i.e. dy <= 0, we've reached the bottom of the polygon and need to exit
+		BEQ bottom
+		STA bres_target_y_relative_r	; Reduced y position is relative to the current y position
+		STX bres_target_y_r
+		STY right_index
+
+	@check_steepness:
+		LDX dx							; Going in here: A = |dy|, X = |dx|
+		CMP dx
+		BCS :+							; Swap A and X if dy > dx
+			TAX
+			LDA dx
+	:	ROL routine_index				; C = 1 if dy < dx, i.e. the x axis is the major axis
+
+	@get_slope:
+		JSR udiv_8x8bit_frac
+		STX bres_slope_r
+
+	@set_residual:
+		LDA #$80
+		STA bres_residual_r
+
+	@get_routine:
+		LDA routine_index				; Bit 0 indicates the major axis, bit 1 indicates the traversal direction along the x axis
+		AND #%00000011					; Only the two lower order bits contain index information
+		TAX
+		LDA right_routine_table_lo, X
+		STA bres_routine_ptr_r + 0
+		LDA right_routine_table_hi, X
+		STA bres_routine_ptr_r + 1
+		JMP step_bres_right				; This may be able to be removed after a slight refactor, with execution falling straight through to step_bres_right
+
+	bottom:
+		SEC								; Indicate that we have not completed a row in full with C = 1
+		RTS								; Return to the original caller instead of continuing to step along the perimeter
+	.ENDPROC
+
+	; Initiates a step along the right edge
+	;	Takes:
+	;	Returns: C = 0 if a full row was processed, C = 1 if the bottom of the polygon was reached
+	;	Clobbers: A, X, Y, $1E - $1F
+	.PROC	step_bres_right
+		LAX bres_target_y_relative_r	; Subtract 8 from the relative target position as we've moved down a row since last iteration
+		AXS #$08						; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
+		STX bres_target_y_relative_r
+
+		LDX bres_current_y_r			; Load saved bresenham parameters
+		LDY bres_current_x_r
+		LDA bres_residual_r
+
+		CPY rightmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
+		BCC :+							; This check handles the first line, as well as lines with vertices, as this routine is called by read_vertex_left
+			STY rightmost_pixel
+
+	:	JMP (bres_routine_ptr_r)
+	.ENDPROC
+
+	; Bresenham routines for right traversal
+	.REPEAT	4, i
+		.IDENT(.SPRINTF("bres_routine_right_%d", i)):
+		@loop:
+			CLC
+			ADC bres_slope_r
+			BCC @increment_major
+		@increment_minor:
+			.IF	i .MOD 2 = 1				; Cases where Y is the minor axis
+				STY z:right_edges + $08, X	; Uses negative indexing, i.e. zeropage wraparound
+				INX
+				BEQ bres_exit_right			; If we've reached the bottom of the current tile row, i.e. X = 0, we must exit
+			.ELSEIF i = 0					; Case where X is the minor axis and dx > 0
+				DEY
+			.ELSEIF	i = 2					; Case where X is the minor axis and dx < 0
+				INY
+			.ENDIF
+		@increment_major:
+		.IF i .MOD 2 = 0					; Cases where Y is the major axis
+			STY z:right_edges + $08, X		; Uses negative indexing, i.e. zeropage wraparound
+			INX
+			BEQ bres_exit_right				; If we've reached the bottom of the current tile row, i.e. X = 0, we must exit
+			CPX bres_target_y_relative_r
+		.ELSEIF	i = 1						; Case where X is the major axis and dx > 0
+			DEY
+			CPY bres_target_x_r
+		.ELSEIF	i = 3						; Case where X is the major axis and dx < 0
+			INY
+			CPY bres_target_x_r
+		.ENDIF
+			BNE @loop
+			JMP read_vertex_right			; Read a new vertex if we reach the end of an edge before reahing the bottom of the current tile row
+	.ENDREPEAT
+
+	; Cleans up after we've stepped through a whole tile
+	.PROC	bres_exit_right
+		STY bres_current_x_r
+		STA bres_residual_r
+		LDA #<-$08						; Reset index back to -8 for the next row
+		STA bres_current_y_r
+
+		CPY rightmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
+		BCC :+							; This check handles the last line
+			STY rightmost_pixel
+			CLC							; Indicate that we've completed a row in full with C = 0
+	:	RTS
+	.ENDPROC
+
+	;
+	;	Takes:
+	;	Returns:
+	;	Clobbers: A, X, Y, $1E - $1F
+	.PROC	rasterize_tile_row
+		STA $4448
+		RTS
+
+
+		leftmost_tile		:= leftmost_pixel
+		rightmost_tile		:= rightmost_pixel
+		nametable_ptr		:= $1E	; And $1F
+
+	set_leftmost_tile:
+		LDA leftmost_pixel
+		LSR
+		LSR
+		LSR
+		STA leftmost_tile
+
+	set_rightmost_tile:
+		LDA rightmost_pixel
+		LSR
+		LSR
+		LSR
+		STA rightmost_tile
+
+	set_nametable_ptr:
+		LDX tile_row
+		LDA screen_lo, X
+		STA nametable_ptr + 0
+		LDA screen_hi, X
+		CLC
+		ADC #>nametable_buffer
+		STA nametable_ptr + 1
+
+	loop:
+		LDY leftmost_tile
+		INC leftmost_tile
+		LDA (nametable_ptr), Y
+		BEQ @allocate_new
+		CMP allocated_opaque_patterns
+		BCC loop
+	@modify_existing:
+
+	@allocate_new:
+	
+	.ENDPROC
+
+; Rasterizes an entire tile row based on the contents of left_edges and right_edges
+;
+;
+;rasterize_tile_row:
+;	LDA #$80
+;	ADC #$80			; assert(psoverflow == 1)
+;	LDY #$07
+;@loop:
+;	LDA left_edges, Y
+;	LDX #%11111000
+;	AXS #$00
+;	BEQ :+				; Invert this condition to increase typical case speed by 2 cycles?
+;		LDA #$FF
+;		BCC @next
+;		LDA #$00
+;		BEQ :++
+;:	AND #%00000111
+;	TAX
+;	LDA lmask_table, X
+;:	STA temp
+;
+;	LDA right_edges, Y
+;	LDX #%11111000
+;	AXS #$00
+;	BEQ :+
+;		LDA #$FF		; Maybe pull this out into its own thing, after the BCS? Same w/ above. Saves 4 cycles typically
+;		BCS @next
+;		LDA #$00
+;		BEQ :++
+;:	AND #%00000111
+;	TAX
+;	LDA rmask_table, X
+;:	ORA temp
+;
+;@next:
+;	BEQ :+
+;		CLV
+;:	STA alpha_buffer, Y
+;	DEY
+;	BPL @loop
+;	BVC rasterize_tile_row
+
+	.PUSHSEG
+		.RODATA
+		left_routine_table_lo:
+		.LOBYTES	bres_routine_left_0, bres_routine_left_1
+		.LOBYTES	bres_routine_left_2, bres_routine_left_3
+
+		left_routine_table_hi:
+		.HIBYTES	bres_routine_left_0, bres_routine_left_1
+		.HIBYTES	bres_routine_left_2, bres_routine_left_3
+
+		right_routine_table_lo:
+		.LOBYTES	bres_routine_right_0, bres_routine_right_1
+		.LOBYTES	bres_routine_right_2, bres_routine_right_3
+
+		right_routine_table_hi:
+		.HIBYTES	bres_routine_right_0, bres_routine_right_1
+		.HIBYTES	bres_routine_right_2, bres_routine_right_3
+	.POPSEG
 .ENDPROC
 
 ; Draws a line from (x0, y0) to (x1, y1) using bresenham's algorithm
