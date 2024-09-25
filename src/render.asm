@@ -2157,56 +2157,58 @@ exit:
 
 	; Bresenham routines for left traversal
 	.PROC	bres_routine_left_xp
-
+	:	CPY bres_target_x_l
+		BEQ read_vertex_left
+		INY
+		CLC
+		ADC bres_slope_l
+		BCC :-
+			STY left_edges + $08, X
+			INX
+			BNE :-
+			BEQ bres_exit_left
 	.ENDPROC
 
 	.PROC	bres_routine_left_xn
-
+	:	CPY bres_target_x_l
+		BEQ read_vertex_left
+		DEY
+		CLC
+		ADC bres_slope_l
+		BCC :-
+			STY left_edges + $08, X
+			INX
+			BNE :-
+			BEQ bres_exit_left
 	.ENDPROC
 
 	.PROC	bres_routine_left_yp
-
+	@loop:
+		CPX bres_target_y_relative_l
+		BEQ read_vertex_left
+		CLC
+		ADC bres_slope_l
+		BCC :+
+			INY
+	:	STY left_edges + $08, X
+		INX
+		BNE @loop
+		BEQ bres_exit_left
 	.ENDPROC
 
 	.PROC	bres_routine_left_yn
-
+	@loop:
+		CPX bres_target_y_relative_l
+		BEQ read_vertex_left
+		CLC
+		ADC bres_slope_l
+		BCC :+
+			DEY
+	:	STY left_edges + $08, X
+		INX
+		BNE @loop
+		BEQ bres_exit_left
 	.ENDPROC
-
-	.REPEAT 2, i
-		.IDENT(.SPRINTF("bres_routine_left_x%d", i)):
-		@loop:
-			CPY bres_target_x_l
-			BEQ read_vertex_left
-			.IF i = 0
-				INY
-			.ELSE
-				DEY
-			.ENDIF
-			CLC
-			ADC bres_slope_l
-			BCC @loop
-				STY left_edges + $08, X
-				INX
-				BNE @loop
-				BEQ bres_exit_left
-
-		.IDENT(.SPRINTF("bres_routine_left_y%d", i)):
-		@loop:
-			CPX bres_target_y_relative_l
-			BEQ read_vertex_left
-			CLC
-			ADC bres_slope_l
-			BCC :+
-			.IF	i = 0
-				INY
-			.ELSE
-				DEY
-			.ENDIF
-		:	STY left_edges + $08, X
-			INX
-			BNE @loop
-			BEQ bres_exit_left
-	.ENDREPEAT
 
 	; Reads a vertex from poly_ptr at left_index, and sets up left bresenham properties based the current position and the values read
 	; Note: Assumes that bres_target_x_l and bres_target_y_l represent the current position. Assumes that left index points to the final byte of the vertex, and 
@@ -2293,38 +2295,74 @@ exit:
 	:	JMP (bres_routine_ptr_l)
 	.ENDPROC
 
-;	.REPEAT	4, i
-;		.IDENT(.SPRINTF("bres_routine_left_%d", i)):
-;		@loop:
-;			CLC
-;			ADC bres_slope_l
-;			BCC @increment_major
-;		@increment_minor:
-;			.IF	i .MOD 2 = 0				; Cases where Y is the minor axis
-;				STY z:left_edges + $08, X	; Uses negative indexing, i.e. zeropage wraparound
-;				INX
-;				BEQ bres_exit_left
-;			.ELSEIF i = 1					; Case where X is the minor axis and dx > 0
-;				DEY
-;			.ELSEIF	i = 3					; Case where X is the minor axis and dx < 0
-;				INY
-;			.ENDIF
-;		@increment_major:
-;		.IF i .MOD 2 = 1					; Cases where Y is the major axis
-;			STY z:left_edges + $08, X		; Uses negative indexing, i.e. zeropage wraparound
-;			INX
-;			BEQ bres_exit_left
-;			CPX bres_target_y_relative_l
-;		.ELSEIF	i = 0						; Case where X is the major axis and dx > 0
-;			DEY
-;			CPY bres_target_x_l
-;		.ELSEIF	i = 2						; Case where X is the major axis and dx < 0
-;			INY
-;			CPY bres_target_x_l
-;		.ENDIF
-;			BNE @loop
-;			JMP read_vertex_left
-;	.ENDREPEAT
+	; Cleans up after we've stepped through a whole tile
+	.PROC	bres_exit_right
+		STY bres_current_x_r
+		STA bres_residual_r
+		LDA #<-$08						; Reset index back to -8 for the next row
+		STA bres_current_y_r
+
+		CPY rightmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
+		BCC :+							; This check handles the last line
+			STY rightmost_pixel
+			CLC							; Indicate that we've completed a row in full with C = 0
+	:	RTS
+	.ENDPROC
+
+	; Bresenham routines for right traversal
+	.PROC	bres_routine_right_xp
+	:	CPY bres_target_x_r
+		BEQ read_vertex_right
+		INY
+		CLC
+		ADC bres_slope_r
+		BCC :-
+			STY right_edges + $08, X
+			INX
+			BNE :-
+			BEQ bres_exit_right
+	.ENDPROC
+
+	.PROC	bres_routine_right_xn
+	:	CPY bres_target_x_r
+		BEQ read_vertex_right
+		DEY
+		CLC
+		ADC bres_slope_r
+		BCC :-
+			STY right_edges + $08, X
+			INX
+			BNE :-
+			BEQ bres_exit_right
+	.ENDPROC
+
+	.PROC	bres_routine_right_yp
+	@loop:
+		CPX bres_target_y_relative_r
+		BEQ read_vertex_right
+		CLC
+		ADC bres_slope_r
+		BCC :+
+			INY
+	:	STY right_edges + $08, X
+		INX
+		BNE @loop
+		BEQ bres_exit_right
+	.ENDPROC
+
+	.PROC	bres_routine_right_yn
+	@loop:
+		CPX bres_target_y_relative_r
+		BEQ read_vertex_right
+		CLC
+		ADC bres_slope_r
+		BCC :+
+			DEY
+	:	STY right_edges + $08, X
+		INX
+		BNE @loop
+		BEQ bres_exit_right
+	.ENDPROC
 
 	; Reads a vertex from poly_ptr at right_index, and sets up right bresenham properties based the current position and the values read
 	; Note: Assumes that bres_target_x_r and bres_target_y_r represent the current position. Assumes that right index points to the last byte of the previous vertex, 
@@ -2365,7 +2403,7 @@ exit:
 	@check_steepness:
 		LDX dx							; Going in here: A = |dy|, X = |dx|
 		CMP dx
-		BCS :+							; Swap A and X if dy > dx
+		BCC :+							; Swap A and X if dy > dx
 			TAX
 			LDA dx
 	:	ROL routine_index				; C = 1 if dy < dx, i.e. the x axis is the major axis
@@ -2411,54 +2449,6 @@ exit:
 			STY rightmost_pixel
 
 	:	JMP (bres_routine_ptr_r)
-	.ENDPROC
-
-	; Bresenham routines for right traversal
-	.REPEAT	4, i
-		.IDENT(.SPRINTF("bres_routine_right_%d", i)):
-		@loop:
-			CLC
-			ADC bres_slope_r
-			BCC @increment_major
-		@increment_minor:
-			.IF	i .MOD 2 = 1				; Cases where Y is the minor axis
-				STY z:right_edges + $08, X	; Uses negative indexing, i.e. zeropage wraparound
-				INX
-				BEQ bres_exit_right			; If we've reached the bottom of the current tile row, i.e. X = 0, we must exit
-			.ELSEIF i = 0					; Case where X is the minor axis and dx > 0
-				DEY
-			.ELSEIF	i = 2					; Case where X is the minor axis and dx < 0
-				INY
-			.ENDIF
-		@increment_major:
-		.IF i .MOD 2 = 0					; Cases where Y is the major axis
-			STY z:right_edges + $08, X		; Uses negative indexing, i.e. zeropage wraparound
-			INX
-			BEQ bres_exit_right				; If we've reached the bottom of the current tile row, i.e. X = 0, we must exit
-			CPX bres_target_y_relative_r
-		.ELSEIF	i = 1						; Case where X is the major axis and dx > 0
-			DEY
-			CPY bres_target_x_r
-		.ELSEIF	i = 3						; Case where X is the major axis and dx < 0
-			INY
-			CPY bres_target_x_r
-		.ENDIF
-			BNE @loop
-			JMP read_vertex_right			; Read a new vertex if we reach the end of an edge before reahing the bottom of the current tile row
-	.ENDREPEAT
-
-	; Cleans up after we've stepped through a whole tile
-	.PROC	bres_exit_right
-		STY bres_current_x_r
-		STA bres_residual_r
-		LDA #<-$08						; Reset index back to -8 for the next row
-		STA bres_current_y_r
-
-		CPY rightmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
-		BCC :+							; This check handles the last line
-			STY rightmost_pixel
-			CLC							; Indicate that we've completed a row in full with C = 0
-	:	RTS
 	.ENDPROC
 
 	;
@@ -2555,20 +2545,20 @@ exit:
 	.PUSHSEG
 		.RODATA
 		left_routine_table_lo:
-		.LOBYTES	bres_routine_left_0, bres_routine_left_1
-		.LOBYTES	bres_routine_left_2, bres_routine_left_3
+		.LOBYTES	bres_routine_left_yn, bres_routine_left_xn
+		.LOBYTES	bres_routine_left_yp, bres_routine_left_xp
 
 		left_routine_table_hi:
-		.HIBYTES	bres_routine_left_0, bres_routine_left_1
-		.HIBYTES	bres_routine_left_2, bres_routine_left_3
+		.HIBYTES	bres_routine_left_yn, bres_routine_left_xn
+		.HIBYTES	bres_routine_left_yp, bres_routine_left_xp
 
 		right_routine_table_lo:
-		.LOBYTES	bres_routine_right_0, bres_routine_right_1
-		.LOBYTES	bres_routine_right_2, bres_routine_right_3
+		.LOBYTES	bres_routine_right_xn, bres_routine_right_yn
+		.LOBYTES	bres_routine_right_xp, bres_routine_right_yp
 
 		right_routine_table_hi:
-		.HIBYTES	bres_routine_right_0, bres_routine_right_1
-		.HIBYTES	bres_routine_right_2, bres_routine_right_3
+		.HIBYTES	bres_routine_right_xn, bres_routine_right_yn
+		.HIBYTES	bres_routine_right_xp, bres_routine_right_yp
 	.POPSEG
 .ENDPROC
 

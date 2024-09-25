@@ -101,7 +101,7 @@ test_poly:
 .BYTE	$09
 .BYTE	$00
 .BYTE	$80, $40
-.BYTE	$C0, $80
+.BYTE	$A3, $80
 .BYTE	$80, $C0
 .BYTE	$20, $80
 

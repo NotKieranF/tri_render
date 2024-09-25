@@ -17,7 +17,7 @@ function rasterize_row()
 		left = emu.read(left_edges + i, emu.memType.nesMemory)
 		right = emu.read(right_edges + i, emu.memType.nesMemory)
 		row = emu.read(tile_row, emu.memType.nesMemory) * 8
-		if (left > right) then
+		if (left < right) then
 --			emu.log(i)
 			emu.drawLine(left, row + i, right, row + i)
 		end
