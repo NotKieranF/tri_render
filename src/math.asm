@@ -530,9 +530,11 @@ just_right:
 	STX quotient
 @loop:
 	ASL
+	BCS :+
 	CMP divisor
-	BCC :+
-	SBC divisor
+	BCC :++
+:	SBC divisor
+	SEC
 :	ROL quotient
 	BCC @loop
 	LDX quotient

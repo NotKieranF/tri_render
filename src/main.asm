@@ -95,24 +95,104 @@ init_pattern:
 ;	JSR draw_line
 ;	STA $4445
 
+; Test udiv_8x8bit_frac
+;.PROC	test_udiv_8x8bit_frac
+;	LDA #$00
+;	LDX #$01
+;	STA $FE
+;	STX $FF
+;:	LDA $FE
+;	LDX $FF
+;	JSR udiv_8x8bit_frac
+;	STA $EE
+;	STX $EF
+;	STA $4444
+;	INC $FE
+;	BNE :-
+;	INC $FF
+;	BNE :-
+;.ENDPROC
+
 .PUSHSEG
 .RODATA
-test_poly:
-.BYTE	$09
+.PROC	test_poly
+.BYTE	$0B
 .BYTE	$00
 .BYTE	$80, $40
-.BYTE	$A3, $80
+.BYTE	$C0, $80
 .BYTE	$80, $C0
-.BYTE	$20, $80
+.BYTE	$40, $80
+.BYTE	$20, $60
+.ENDPROC
+
+.BSS
+test_poly_buffer:	.res 32
 
 .POPSEG
 
+	LDX #$00
+:	LDA test_poly, X
+	STA test_poly_buffer, X
+	INX
+	CPX #.SIZEOF(test_poly)
+	BNE :-
+
+	LDA #$02
+	STA $FF
+
 forever:
-	LDA #<test_poly
+	LDX $FF
+	LDA buttons_held
+	AND #BUTTON_UP
+	BEQ :+
+		DEC test_poly_buffer + 1, X
+:	LDA buttons_held
+	AND #BUTTON_DOWN
+	BEQ :+
+		INC test_poly_buffer + 1, X
+:	LDA buttons_held
+	AND #BUTTON_LEFT
+	BEQ :+
+		DEC test_poly_buffer + 0, X
+:	LDA buttons_held
+	AND #BUTTON_RIGHT
+	BEQ :+
+		INC test_poly_buffer + 0, X
+:	LDA buttons_down
+	AND #BUTTON_A
+	BEQ :++
+		LDA $FF
+		CLC
+		ADC #$02
+		CMP test_poly_buffer + 0
+		BCC :+
+			LDA #$02
+	:	STA $FF
+:	LDA buttons_down
+	AND #BUTTON_B
+	BEQ :++
+		LDA $FF
+		SEC
+		SBC #$02
+		CMP #$02
+		BCS :+
+			LDA test_poly_buffer + 0
+			SBC #$00
+	:	STA $FF
+:
+
+
+	LDA #<test_poly_buffer
 	STA $00
-	LDA #>test_poly
+	LDA #>test_poly_buffer
 	STA $01
+
+	LDA #PPU::GRAYSCALE
+	ORA soft_ppuctrl
+	STA PPU::MASK
 	JSR rasterize_poly
+	LDA soft_ppumask
+	STA PPU::MASK
 
 	JSR wait_for_nmi
 	JSR read_controller

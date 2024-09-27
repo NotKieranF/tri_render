@@ -119,6 +119,8 @@
 ;		  i.e. ((buttons_held & ACTION_MASK) ^ ACTION_MASK = 0) & (buttons_down & ACTION_MASK != 0)
 ;		- For actions that work based on buttons_up, one must check that at least one button has been released this frame, and that the rest are held,
 ;		  i.e. (((buttons_held | buttons_up) & ACTION_MASK) ^ ACTION_MASK = 0) & (buttons_up & ACTION_MASK != 0)
+;	* Maybe a good idea to ditch Bresenham's algorithm in favor of something which only steps along the Y axis?
+;		- If it's not more efficient in general, then we can have it only for very shallow slopes
 
 ; Mesh format outline:
 ;	* Broken up generally into vertex list, face list, and line list, plus misc info like radius.
@@ -169,11 +171,13 @@
 ;		* Kicked off by NMI
 ;		* Needs to take a constant time
 
+RASTERIZE_ROWS = 1
+
 .ZEROPAGE
 display_list_indices:			.RES 32
 display_list_size:				.RES 1
-left_edges:						.RES 8				; Buffer containing the leftmost pixels of a tile row to be rasterized
-right_edges:					.RES 8				; Buffer containing the rightmost pixels of a tile row to be rasterized
+left_edges:						.RES 8 * RASTERIZE_ROWS	; Buffer containing the leftmost pixels of a tile row to be rasterized
+right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixels of a tile row to be rasterized
 
 ; Camera parameters
 camera_pos_sub:
@@ -2099,9 +2103,9 @@ prefill_edges:
 	STX leftmost_pixel			; This ensures they are immediately reloaded when we start stepping along the left and right edges
 
 read_initial_vertices:
-	JSR read_vertex_right
+	JSR read_vertex_right_initial
 	BCS exit					; If first right vertex is at the same level as the topmost vertex, all points are colinear
-:	JSR read_vertex_left		; Keep reading vertices to the left until we find one that's below the current. We are guaranteed to find one as we've already 
+:	JSR read_vertex_left_initial		; Keep reading vertices to the left until we find one that's below the current. We are guaranteed to find one as we've already 
 	BCS :-						; established the first right vertex is below the topmost vertex
 
 loop:
@@ -2124,15 +2128,17 @@ read_final_left_vertex:
 	JSR step_bres_left
 
 postfill_edges:
-	LDX bres_target_y_l
-	LDA #$00
+	LDX bres_current_y_r
+	CPX bres_current_y_l
+	BCC :+
+		LDX bres_current_y_l
+:	LDA #$00
 	LDY #$FF
 @loop:
-	INX
-	BEQ @exit
 	STA z:right_edges + $08, X
 	STY z:left_edges + $08, X	
-	BMI @loop
+	INX
+	BNE @loop
 @exit:
 
 final_row_rasterization:
@@ -2145,7 +2151,7 @@ exit:
 	.PROC	bres_exit_left
 		STY bres_current_x_l
 		STA bres_residual_l
-		LDA #<-$08						; Reset index back to -8 for the next row
+		LDA #<-($08 * RASTERIZE_ROWS)	; Reset index back to -8 for the next row
 		STA bres_current_y_l
 
 		CPY leftmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
@@ -2155,6 +2161,8 @@ exit:
 	:	RTS
 	.ENDPROC
 
+	; TODO: Clear carries before slope additions aren't strictly necessary as we can be sure of the carry state beforehand
+
 	; Bresenham routines for left traversal
 	.PROC	bres_routine_left_xp
 	:	CPY bres_target_x_l
@@ -2163,7 +2171,7 @@ exit:
 		CLC
 		ADC bres_slope_l
 		BCC :-
-			STY left_edges + $08, X
+			STY left_edges + $08 * RASTERIZE_ROWS, X
 			INX
 			BNE :-
 			BEQ bres_exit_left
@@ -2176,7 +2184,7 @@ exit:
 		CLC
 		ADC bres_slope_l
 		BCC :-
-			STY left_edges + $08, X
+			STY left_edges + $08 * RASTERIZE_ROWS, X
 			INX
 			BNE :-
 			BEQ bres_exit_left
@@ -2190,7 +2198,7 @@ exit:
 		ADC bres_slope_l
 		BCC :+
 			INY
-	:	STY left_edges + $08, X
+	:	STY left_edges + $08 * RASTERIZE_ROWS, X
 		INX
 		BNE @loop
 		BEQ bres_exit_left
@@ -2204,7 +2212,7 @@ exit:
 		ADC bres_slope_l
 		BCC :+
 			DEY
-	:	STY left_edges + $08, X
+	:	STY left_edges + $08 * RASTERIZE_ROWS, X
 		INX
 		BNE @loop
 		BEQ bres_exit_left
@@ -2218,7 +2226,12 @@ exit:
 	;	Clobbers: A, X, Y, $1F
 	.PROC	read_vertex_left
 		routine_index		:= $1F
+		dy					:= $1E
 
+		STX bres_current_y_l
+		STY bres_current_x_l
+
+	::read_vertex_left_initial = *
 		LDY left_index
 	@get_y:
 		LAX (poly_ptr), Y
@@ -2227,13 +2240,18 @@ exit:
 		SBC bres_target_y_l				; Compute dy = target - current. N.B. this is the opposite of normal
 		BCC bottom						; If the target is at or above the current, i.e. dy <= 0, we've reached the bottom of the polygon and need to exit
 		BEQ bottom
+		STA dy
+		CLC
+		ADC bres_current_y_l
+		CLC
+		ADC #$08
 		STA bres_target_y_relative_l	; Reduced y position is relative to the current y position
 		STX bres_target_y_l
 
 	@get_x:
 		LAX (poly_ptr), Y
 		DEY
-	;	SEC								; assert(pscarry == 1)
+		SEC
 		SBC bres_current_x_l			; Compute dx = target - current. N.B. this is the opposite of normal
 		BCS :+
 			EOR #$FF					; Compute |dx| if dx < 0
@@ -2245,11 +2263,11 @@ exit:
 		STY left_index
 
 	@check_steepness:
-		LDX bres_target_y_relative_l	; Going in here: A = |dx|, X = |dy|
-		CMP bres_target_y_relative_l
+		LDX dy							; Going in here: A = |dx|, X = |dy|
+		CMP dy
 		BCC :+							; Swap A and X if dx > dy
 			TAX
-			LDA bres_target_y_relative_l
+			LDA dy
 	:	ROL routine_index				; C = 1 if dx < dy, i.e. the y axis is the major axis
 
 	@get_slope:
@@ -2281,7 +2299,7 @@ exit:
 	;	Clobbers: A, X, Y, $1F
 	.PROC	step_bres_left
 		LAX bres_target_y_relative_l	; Subtract 8 from the relative target position as we've moved down a row since last iteration
-		AXS #$08						; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
+		AXS #$08 * RASTERIZE_ROWS		; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
 		STX bres_target_y_relative_l
 
 		LDX bres_current_y_l			; Load saved bresenham parameters
@@ -2299,7 +2317,7 @@ exit:
 	.PROC	bres_exit_right
 		STY bres_current_x_r
 		STA bres_residual_r
-		LDA #<-$08						; Reset index back to -8 for the next row
+		LDA #<-($08 * RASTERIZE_ROWS)	; Reset index back to -8 for the next row
 		STA bres_current_y_r
 
 		CPY rightmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
@@ -2317,7 +2335,7 @@ exit:
 		CLC
 		ADC bres_slope_r
 		BCC :-
-			STY right_edges + $08, X
+			STY right_edges + $08 * RASTERIZE_ROWS, X
 			INX
 			BNE :-
 			BEQ bres_exit_right
@@ -2330,7 +2348,7 @@ exit:
 		CLC
 		ADC bres_slope_r
 		BCC :-
-			STY right_edges + $08, X
+			STY right_edges + $08 * RASTERIZE_ROWS, X
 			INX
 			BNE :-
 			BEQ bres_exit_right
@@ -2344,7 +2362,7 @@ exit:
 		ADC bres_slope_r
 		BCC :+
 			INY
-	:	STY right_edges + $08, X
+	:	STY right_edges + $08 * RASTERIZE_ROWS, X
 		INX
 		BNE @loop
 		BEQ bres_exit_right
@@ -2358,7 +2376,7 @@ exit:
 		ADC bres_slope_r
 		BCC :+
 			DEY
-	:	STY right_edges + $08, X
+	:	STY right_edges + $08 * RASTERIZE_ROWS, X
 		INX
 		BNE @loop
 		BEQ bres_exit_right
@@ -2374,6 +2392,10 @@ exit:
 		routine_index		:= $1F
 		dx					:= $1E
 
+		STX bres_current_y_r
+		STY bres_current_x_r
+
+	::read_vertex_right_initial = *
 		LDY right_index
 	@get_x:
 		INY
@@ -2396,9 +2418,15 @@ exit:
 		SBC bres_target_y_r				; Compute dy = target - current. N.B. this is the opposite of normal
 		BCC bottom						; If the target is at or above the current, i.e. dy <= 0, we've reached the bottom of the polygon and need to exit
 		BEQ bottom
+		PHA
+		CLC
+		ADC bres_current_y_r
+		CLC
+		ADC #$08
 		STA bres_target_y_relative_r	; Reduced y position is relative to the current y position
 		STX bres_target_y_r
 		STY right_index
+		PLA
 
 	@check_steepness:
 		LDX dx							; Going in here: A = |dy|, X = |dx|
@@ -2437,7 +2465,7 @@ exit:
 	;	Clobbers: A, X, Y, $1E - $1F
 	.PROC	step_bres_right
 		LAX bres_target_y_relative_r	; Subtract 8 from the relative target position as we've moved down a row since last iteration
-		AXS #$08						; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
+		AXS #$08 * RASTERIZE_ROWS		; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
 		STX bres_target_y_relative_r
 
 		LDX bres_current_y_r			; Load saved bresenham parameters
