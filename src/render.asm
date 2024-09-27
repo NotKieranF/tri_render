@@ -2194,12 +2194,12 @@ exit:
 	@loop:
 		CPX bres_target_y_relative_l
 		BEQ read_vertex_left
+		STY left_edges + $08 * RASTERIZE_ROWS, X
 		CLC
 		ADC bres_slope_l
 		BCC :+
 			INY
-	:	STY left_edges + $08 * RASTERIZE_ROWS, X
-		INX
+	:	INX
 		BNE @loop
 		BEQ bres_exit_left
 	.ENDPROC
@@ -2208,12 +2208,12 @@ exit:
 	@loop:
 		CPX bres_target_y_relative_l
 		BEQ read_vertex_left
+		STY left_edges + $08 * RASTERIZE_ROWS, X
 		CLC
 		ADC bres_slope_l
 		BCC :+
 			DEY
-	:	STY left_edges + $08 * RASTERIZE_ROWS, X
-		INX
+	:	INX
 		BNE @loop
 		BEQ bres_exit_left
 	.ENDPROC
@@ -2358,12 +2358,12 @@ exit:
 	@loop:
 		CPX bres_target_y_relative_r
 		BEQ read_vertex_right
+		STY right_edges + $08 * RASTERIZE_ROWS, X
 		CLC
 		ADC bres_slope_r
 		BCC :+
 			INY
-	:	STY right_edges + $08 * RASTERIZE_ROWS, X
-		INX
+	:	INX
 		BNE @loop
 		BEQ bres_exit_right
 	.ENDPROC
@@ -2372,12 +2372,12 @@ exit:
 	@loop:
 		CPX bres_target_y_relative_r
 		BEQ read_vertex_right
+		STY right_edges + $08 * RASTERIZE_ROWS, X
 		CLC
 		ADC bres_slope_r
 		BCC :+
 			DEY
-	:	STY right_edges + $08 * RASTERIZE_ROWS, X
-		INX
+	:	INX
 		BNE @loop
 		BEQ bres_exit_right
 	.ENDPROC
