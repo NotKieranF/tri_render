@@ -1,11 +1,11 @@
 ﻿rasterize_row_callback = 0x4448
 left_edges = emu.getLabelAddress("left_edges")["address"]
 right_edges = emu.getLabelAddress("right_edges")["address"]
-tile_row_addr = 0x08
-target_relative_y_l_addr = 0x11
-target_relative_y_r_addr = 0x12
-target_x_l_addr = 0xD
-target_x_r_addr = 0xE
+tile_row_addr = 0x07
+target_relative_y_l_addr = 0x10
+target_relative_y_r_addr = 0x11
+target_x_l_addr = 0xC
+target_x_r_addr = 0xD
 
 function rasterize_row()
 	row = emu.read(tile_row_addr, emu.memType.nesMemory) * 8
@@ -15,7 +15,7 @@ function rasterize_row()
 	target_relative_y_r = emu.read(target_relative_y_r_addr, emu.memType.nesMemory)
 
 	for i=0,30 do
-		emu.drawLine(0, i * 8, 255, i * 8, 0x0000FF)
+--		emu.drawLine(0, i * 8, 255, i * 8, 0x0000FF)
 	end
 
 	for i=0,7 do

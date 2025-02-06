@@ -83,6 +83,7 @@
 ;		- In terms of implementation details, it would probably be best to first check for Z < 256, and then jump to a routine that uses a dedicated reciprocal lookup
 ;		  table and performs a full 16.0-by-0.16-bit multiplication with 16.0 bit result, instead of the optimized 16.0-by-0.8-bit multiplication that the main path
 ;		  performs.
+;		- Might actually be more reasonable to perform a 16bit/8bit division in the case where Z < 256?
 ;	* For normalizing vectors, sqrt15 on https://github.com/TobyLobster/sqrt_test?tab=readme-ov-file is particularly fast, at a modest cost of 512 bytes. Additionally,
 ;	  a similar technique can be directly applied directly to the inverse square root function: we first shift the input left two bits at a time until the hi byte is
 ;	  within the range $40-$FF. We then use this hi byte as an index into an inverse square root table to produce an intermediate answer. Finally, we shift the
@@ -121,6 +122,7 @@
 ;		  i.e. (((buttons_held | buttons_up) & ACTION_MASK) ^ ACTION_MASK = 0) & (buttons_up & ACTION_MASK != 0)
 ;	* Maybe a good idea to ditch Bresenham's algorithm in favor of something which only steps along the Y axis?
 ;		- If it's not more efficient in general, then we can have it only for very shallow slopes
+;	* Maybe a good idea to check whether screen-space vertices are in-bounds during projection, and set a flag if any are not so as to avoid iterating when not needed
 
 ; Mesh format outline:
 ;	* Broken up generally into vertex list, face list, and line list, plus misc info like radius.
@@ -171,13 +173,18 @@
 ;		* Kicked off by NMI
 ;		* Needs to take a constant time
 
-RASTERIZE_ROWS = 1
+RASTERIZE_ROWS	= 1	; Number of tile rows to be rasterized at a time
+NUM_SHADES		= 9	; Number of color shades
 
 .ZEROPAGE
 display_list_indices:			.RES 32
 display_list_size:				.RES 1
 left_edges:						.RES 8 * RASTERIZE_ROWS	; Buffer containing the leftmost pixels of a tile row to be rasterized
 right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixels of a tile row to be rasterized
+tile_buffer_alpha:				.RES 8
+temp_mask:						.RES 1	; TODO: fold this into other temp variables
+next_partial_pattern_index:		.RES 1	; Grows upwards from $01
+next_opaque_pattern_index:		.RES 1	; Grows downwards from $FF
 
 ; Camera parameters
 camera_pos_sub:
@@ -229,18 +236,22 @@ poly_buffer_next:				.RES POLY_MAX_VERTICES
 poly_buffer_first:				.RES 1
 poly_buffer_last:				.RES 1
 
-allocated_partial_patterns:		.RES 1
-allocated_opaque_patterns:		.RES 1
-
 
 
 
 
 .SEGMENT	"SAVERAM"
+; Converts color IDs into pattern table indices
+opaque_tile_indices:			.RES NUM_SHADES
+
 .ALIGN	256
 ; Pattern table buffers
-pattern_buffer:					.RES RENDER_MAX_TILES * 16
-pattern_buffer_alpha:			.RES RENDER_MAX_TILES * 8	; 1 is transparent, 0 is opaque
+.REPEAT	8, i
+	.ident(.sprintf("pattern_buffer_%d", i)):
+								.RES RENDER_MAX_TILES
+	.ident(.sprintf("pattern_buffer_alpha_%d", i)):
+								.RES RENDER_MAX_TILES		; 1 is transparent, 0 is opaque
+.ENDREP
 
 ; Nametable buffer
 nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
@@ -1666,361 +1677,6 @@ inner_loop:
 .ENDPROC
 
 ;
-;	Takes:
-;	Returns:
-;	Clobbers: A, X, Y, $00 - $1F
-.IF 0
-.PROC	rasterize_poly
-	topmost_px					:= $1A
-	bottommost_px				:= $1B
-	leftmost_px					:= $1C
-	rightmost_px				:= $1D
-	fill_color_lo_ptr:			:= $12	; And $13
-	fill_color_hi_ptr:			:= $14	; And $15
-	name_buffer_ptr				:= $16	; And $17
-	pattern_buffer_alpha_ptr:	:= $18	; And $19
-	pattern_buffer_lo_ptr:		:= $1A	; And $1B
-	pattern_buffer_hi_ptr:		:= $1C	; And $1D
-	poly_ptr					:= $1E	; And $1F
-
-;	rasterizePoly(Poly* polyPtr) {
-;		int bresTargetL;
-;		int bresTargetR;
-;		int bresErrorL;
-;		int bresErrorR;
-;		int bresSlopeL;
-;		int bresSlopeR;
-;		int bresRoutineL;
-;		int bresRoutineR;
-;
-;		// Initlialization
-;		int color = *(polyPtr++);
-;		int targetVertexL = 2;
-;		int targetVertexR = *(polyPtr++);
-;		int bresCurrentXL = *(polyPtr + 0);
-;		int bresCurrentYL = *(polyPtr + 1);
-;		int bresCurrentXR = *(polyPtr + 0);
-;		int bresCurrentYR = *(polyPtr + 1);
-;
-;
-;		
-;	}
-;
-;	initBresL() {
-;		bresTargetXL = *(polyPtr + targetVertexL++);
-;		bresTargetYL = *(polyPtr + targetVertexL++);
-;
-;		xDif = bresTargetXL - bresCurrentXL;
-;		yDif = bresTargetYL - bresCurrentYL;
-;		if (xDif < 0) {
-;			xDif = abs(xDif)
-;			if (xDif > yDif) {
-;				//
-;				bresSlopeL = yDif / xDif;
-;				bresRoutineL = 0;
-;			} else {
-;				bresSlopeL = xDif / yDif;
-;				bresRoutineL = 1;
-;			}
-;		} else {
-;			if (xDif > yDif) {
-;				bresSlopeL = yDif / xDif;
-;				bresRoutineL = 2;
-;			} else {
-;				bresSlopeL = xDif / yDif;
-;				bresRoutineL = 3;
-;			}
-;		}
-;
-;		bresErrorL = 0;
-;
-;		return;
-;	}
-;
-;	initBresR() {
-;		bresTargetYR = *(polyPtr + targetVertexR--);
-;		bresTargetXR = *(polyPtr + targetVertexR--); 
-;	}
-;
-;	stepBresL() {
-;
-;	}
-
-	LDY #$00
-	LDA (poly_ptr), Y
-	STA right_target_vertex
-
-	INY
-	LDA (poly_ptr), Y
-	STA left_current_x
-	STA right_current_x
-
-	INY
-	LDA (poly_ptr), Y
-	STA left_current_y
-	STA right_current_y
-
-	INY
-	STY left_target_vertex
-	LDA (poly_ptr), Y
-	STA left_target_x
-
-	INY
-	LDA (poly_ptr), Y
-	STA left_target_y
-
-	LDY right_target_vertex
-	LDA (poly_ptr), Y
-	STA right_target_y
-
-	DEY
-	LDA (poly_ptr), Y
-
-read_vertex_left:
-	LDY left_target_vertex
-	LDA (poly_ptr), Y
-	STA left_target_x
-	SEC
-	SBC left_current_x
-	BCS @pos
-@neg:
-	EOR #$FF
-;	CLC
-	ADC #$01
-@pos:
-	STA dx
-
-	INY
-	LDA (poly_ptr), Y
-	STA left_target_y
-	SEC
-	SBC left_current_y
-	CMP dx
-	BCS @pos
-@neg:
-	INX
-@pos:
-
-	INY
-	STY left_target_vertex
-
-read_vertex_right:
-	LDY right_target_vertex
-	LDA (poly_ptr), Y
-	STA right_target_y
-
-	DEY
-	LDA (poly_ptr), Y
-	STA right_target_x
-
-	DEY
-	STY right_target_vertex
-
-
-; separate px and tile pos?
-; 32/44 cycles best case, 79 cycles worst case
-; left_encountered should hold $FF before we encounter the left edge, and $00 after
-; right_encountered should hold $00 before we encounter the right edge, and $FF after
-; carry is clear if tile is completely filled, set if not
-; 0's are opaque
-	CLC
-	LDX #$07
-loop:
-	LDA left_encountered, X
-	BEQ :+
-	DEC left_edges_tile, X
-	BNE :+
-		INC left_encountered, X
-		LDY left_edges_px, X
-		LDA left_table, Y
-:	STA temp
-
-	LDA right_encountered, X
-	BNE :+
-	DEC right_edges_tile, X
-	BNE :+
-		DEC right_encountered, X
-		LDY right_edges_px, X
-		LDA right_table, Y
-:	ORA temp
-
-	BEQ :+
-		SEC
-:	STA tile_buffer_alpha, X
-
-	DEX
-	BPL loop
-
-; Maybe better modified version
-; Uses D flag instead of C or V because it needs to use abs, Y indexing for RMW instructions. Fortunately the side effects are negligable in this case
-; Also includes prelude nametable lookup
-get_tile_id:
-	LDA screen_lo, X
-	CLC
-	ADC #<name_buffer
-	STA name_buffer_ptr + 0
-
-	LDA screen_hi, X
-	ADC #>name_buffer
-	STA name_buffer_ptr + 1
-
-	LDA (name_buffer_ptr), Y
-	CMP #BLANK_TILE
-	BEQ not_occluded
-	BCC fully_occluded
-
-partially_occluded:
-	INC allocated_patterns
-	LDA allocated_patterns
-	STA (name_buffer_ptr), Y
-
-; pattern_buffer_alpha_ptr = pattern_buffer_alpha + tile * 8
-; pattern_buffer_lo_ptr = pattern_buffer + tile * 16 + 0
-; pattern_buffer_hi_ptr = pattern_buffer + tile * 16 + 8
-
-	LDA table_lo, X
-	STA pattern_buffer_lo_ptr + 0
-	CLC
-	ADC #$08
-	STA pattern_buffer_hi_ptr + 0
-	LDA table_hi, X
-	STA pattern_buffer_lo_ptr + 1
-	ADC #$00
-	STA pattern_buffer_hi_ptr + 1
-
-
-
-not_occluded:
-	SED
-	LDY #$07
-@loop:
-	LDA left_encountered, Y
-	BEQ :+
-	DCP left_edges_tile, Y
-	BNE :+
-		ISC left_encountered, Y
-		LDX left_edges_px
-		LDA left_table, X
-:	STA temp
-
-	LDA right_encountered, Y
-	BNE :+
-	DCP right_edges_tile, Y
-	BNE :+
-		DCP right_encountered, Y
-		LDX right_edges_px, Y
-		LDA right_table, X
-:	ORA temp
-
-@a:
-	STA (pattern_buffer_alpha_ptr), Y
-	EOR #$FF
-	BEQ :+
-		CLD
-:	TAX
-	AND (color_lo), Y
-	STA (pattern_buffer_lo_ptr), Y
-
-	TXA
-	AND (color_hi), Y
-	STA (pattern_buffer_hi_ptr), Y
-
-	DEY
-	BPL @loop
-
-
-
-
-
-	SED
-	LDY #$07
-loop:
-	LDA left_encountered, Y
-	BEQ :+
-	; This isn't safe --- I think it is actually
-	DCP left_edges_tile, Y
-	BNE :+
-		ISC left_encountered, Y
-		LDX left_edges_px, Y
-		LDA left_table, X
-:	STA temp
-
-	LDA right_encountered, Y
-	BNE :+
-	DCP right_edges_tile, Y
-	BNE :+
-		DCP right_encountered, Y
-		LDX right_edges_px, Y
-		LDA right_table, X
-:	ORA temp
-
-; 63 extra cycles
-	STA temp
-	EOR #$FF
-	AND (pattern_buffer_alpha_ptr), Y
-	TAX
-	BEQ :+
-		CLD
-:	LDA temp
-	AND (pattern_buffer_alpha_ptr), Y
-	STA (pattern_buffer_alpha_ptr), Y
-
-	TXA
-	AND (color_lo), Y
-	ORA (pattern_buffer_lo_ptr), Y
-	STA (pattern_buffer_lo_ptr), Y
-
-	TXA
-	AND (color_hi), Y
-	ORA (pattern_buffer_hi_ptr), Y
-	STA (pattern_buffer_hi_ptr), Y
-
-	DEY
-	BPL loop
-
-; Non-updating version. 35 cycles
-	STA (pattern_buffer_alpha_ptr), Y
-	EOR #$FF
-	BEQ :+
-		CLD
-:	TAX
-	AND (color_lo), Y
-	STA (pattern_buffer_lo_ptr), Y
-
-	TXA
-	AND (color_hi), Y
-	STA (pattern_buffer_hi_ptr), Y
-
-;	rasterizePoly (ScreenPoly* polyPtr) {
-;		int topmostPx;
-;		int bottommostPx:
-;		int leftmostPx;
-;		int rightmostPx;
-;		int leftEdges[8];
-;		int rightEdges[8];
-;
-;		for (int xTile = leftmostPx / 8; xTile < rightmostPx / 8; xTile++) {
-;			for (int yPx = 0; yPx < 8; yPx++) {
-;				tile[xTile][yTile][yPx] = leftEdges[yPx] & rightEdges[yPx]
-;				leftEdges[yPx] -= 8;
-;				rightEdges[yPx] -= 8;
-;			}
-;		}
-;	}
-
-.PUSHSEG
-.RODATA
-left_table:
-	.BYTE	%11111111, %01111111, %00111111, %00011111
-	.BYTE	%00001111, %00000111, %00000011, %00000001, %00000000
-right_table:
-	.BYTE	%00000000, %10000000, %11000000, %11100000
-	.BYTE	%11110000, %11111000, %11111100, %11111110, %11111111
-.POPSEG
-.ENDPROC
-.ENDIF
-
-;
 ;	Takes: Pointer to polygon struct in $00 - $01, with vertices stored in clockwise order, sorted such that the topmost vertex is first, preferring the leftmost 
 ;		   vertex if ambiguous.
 ;	Returns: Nothing
@@ -2033,32 +1689,61 @@ right_table:
 	left_index					:= $02
 	right_index					:= $03
 	poly_color					:= $04
-	poly_size					:= $05
-	leftmost_pixel				:= $06
-	rightmost_pixel				:= $07
-	tile_row					:= $08
+	leftmost_pixel				:= $05
+	rightmost_pixel				:= $06
+	tile_row					:= $07
 
-	bres_current_x_l			:= $09
-	bres_current_x_r			:= $0A
-	bres_current_y_l			:= $0B
-	bres_current_y_r			:= $0C
-	bres_target_x_l				:= $0D
-	bres_target_x_r				:= $0E
-	bres_target_y_l				:= $0F
-	bres_target_y_r				:= $10
-	bres_target_y_relative_l	:= $11
-	bres_target_y_relative_r	:= $12
-	bres_routine_ptr_l			:= $13	; And $14
-	bres_routine_ptr_r			:= $15	; And $16
-	bres_slope_l				:= $17
-	bres_slope_r				:= $18
-	bres_residual_l				:= $19
-	bres_residual_r				:= $1A
+	; Bresenham state for edge stepping
+	bres_current_x_l			:= $08
+	bres_current_x_r			:= $09
+	bres_current_y_l			:= $0A
+	bres_current_y_r			:= $0B
+	bres_target_x_l				:= $0C
+	bres_target_x_r				:= $0D
+	bres_target_y_l				:= $0E
+	bres_target_y_r				:= $0F
+	bres_target_y_relative_l	:= $10
+	bres_target_y_relative_r	:= $11
+	bres_routine_ptr_l			:= $12	; And $13
+	bres_routine_ptr_r			:= $14	; And $15
+	bres_slope_l				:= $16
+	bres_slope_r				:= $17
+	bres_residual_l				:= $18
+	bres_residual_r				:= $19
+
+	; Pointers for rasterizing tile rows
+	right_edge_mask_ptr			:= $1A	; And $1B
+	left_edge_mask_ptr			:= $1C	; And $1D
+	nametable_ptr				:= $1E	; And $1F
+
+	; Temp stuff
+	LDA #$01
+	STA ::next_partial_pattern_index
+	LDA #RENDER_MAX_TILES - 1
+	STA ::next_opaque_pattern_index
+
+	LDA #$00
+	LDX #$00
+:	STA opaque_tile_indices, X
+	INX
+	CPX #NUM_SHADES
+	BNE :-
+
+	; Clear nametable buffer
+	LDA #$00
+	LDX #$00
+	@loop:
+	.REPEAT	::SCREEN_HEIGHT_TILES, i
+		STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+	.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BNE @loop
+	; End temp stuff
 
 	LDY #$00
 get_size:
 	LDA (poly_ptr), Y
-	STA poly_size
 	STA left_index
 
 get_color:
@@ -2103,10 +1788,10 @@ prefill_edges:
 	STX leftmost_pixel			; This ensures they are immediately reloaded when we start stepping along the left and right edges
 
 read_initial_vertices:
-	JSR read_vertex_right_initial
-	BCS exit					; If first right vertex is at the same level as the topmost vertex, all points are colinear
-:	JSR read_vertex_left_initial		; Keep reading vertices to the left until we find one that's below the current. We are guaranteed to find one as we've already 
-	BCS :-						; established the first right vertex is below the topmost vertex
+	JSR read_vertex_left_initial
+	BCS exit					; If first left vertex is at the same level as the topmost vertex, all points are colinear
+:	JSR read_vertex_right_initial		; Keep reading vertices to the right until we find one that's below the current. We are guaranteed to find one as we've already 
+	BCS :-						; established the first left vertex is below the topmost vertex
 
 loop:
 	JSR rasterize_tile_row
@@ -2118,21 +1803,29 @@ loop:
 	DEX							; X = $FF
 	STX leftmost_pixel
 
+	; Step along the right and left edges, breaking out of the loop if either reaches the bottommost vertex (i.e. return with carry set)
 	JSR step_bres_right
 	BCS read_final_left_vertex	; If we've reached the bottom on the right side, i.e. C = 1, we must read step along the left side one last time before rasterization
 	JSR step_bres_left
-	BCS postfill_edges			;
-	JMP loop
+	BCC loop
+
+	; If we've reached this point, then we know that the left edge has reached the bottommost vertex before the right edge has
+	LDX bres_current_y_l
+	JMP postfill_edges
 
 read_final_left_vertex:
 	JSR step_bres_left
+	LDX bres_current_y_r
+	; If the final left step returns with carry clear, we know that the right edge has reached the bottommost vertex before the left edge has
+	BCC :+
+		; Otherwise, we need to compare the two, and swap if bres_current_y_l is lower
+		CPX bres_current_y_l
+		BCC :+
+			LDX bres_current_y_l
+:
 
 postfill_edges:
-	LDX bres_current_y_r
-	CPX bres_current_y_l
-	BCC :+
-		LDX bres_current_y_l
-:	LDA #$00
+	LDA #$00
 	LDY #$FF
 @loop:
 	STA z:right_edges + $08, X
@@ -2145,8 +1838,12 @@ final_row_rasterization:
 	JSR rasterize_tile_row
 
 exit:
+	; Temp
+	STA $5555
 	RTS
 
+	; If bres_exit_left and read_vertex_left are on different pages, then some branches will be slow
+	.ASSERT	>bres_exit_left = >read_vertex_left, warning, "Bresenham routine branches cross page boundaries"
 	; Cleans up after we've stepped through a whole tile
 	.PROC	bres_exit_left
 		STY bres_current_x_l
@@ -2155,10 +1852,10 @@ exit:
 		STA bres_current_y_l
 
 		CPY leftmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
-		BCC :+							; This check handles the last line
+		BCS :+							; This check handles the last line
 			STY leftmost_pixel
-			CLC							; Indicate that we've completed a row in full with C = 0
-	:	RTS
+	:	CLC								; Indicate that we've completed a row in full with C = 0
+		RTS
 	.ENDPROC
 
 	; TODO: Clear carries before slope additions aren't strictly necessary as we can be sure of the carry state beforehand
@@ -2168,7 +1865,7 @@ exit:
 	:	CPY bres_target_x_l
 		BEQ read_vertex_left
 		INY
-		CLC
+	;	CLC	;.assert(pscarry == 0)
 		ADC bres_slope_l
 		BCC :-
 			STY left_edges + $08 * RASTERIZE_ROWS, X
@@ -2223,7 +1920,7 @@ exit:
 	;		leaves it pointing at the final byte of the next vertex in counterclockwise order
 	;	Takes:
 	;	Returns:
-	;	Clobbers: A, X, Y, $1F
+	;	Clobbers: A, X, Y, $1E - $1F
 	.PROC	read_vertex_left
 		routine_index		:= $1F
 		dy					:= $1E
@@ -2296,7 +1993,7 @@ exit:
 	; Initiates a step along the left edge
 	;	Takes:
 	;	Returns: C = 0 if a full row was processed, C = 1 if the bottom of the polygon was reached
-	;	Clobbers: A, X, Y, $1F
+	;	Clobbers: A, X, Y, $1E - $1F
 	.PROC	step_bres_left
 		LAX bres_target_y_relative_l	; Subtract 8 from the relative target position as we've moved down a row since last iteration
 		AXS #$08 * RASTERIZE_ROWS		; This needs to happen before we step along a line due to the fact that we compare a negative index against the target
@@ -2307,12 +2004,14 @@ exit:
 		LDA bres_residual_l
 
 		CPY leftmost_pixel				; The most extreme point in a tile row can only ever fall on the first line, final line, or a line with a vertex
-		BCC :+							; This check handles the first line, as well as lines with vertices, as this routine is called by read_vertex_left
+		BCS :+							; This check handles the first line, as well as lines with vertices, as this routine is called by read_vertex_left
 			STY leftmost_pixel
 
 	:	JMP (bres_routine_ptr_l)
 	.ENDPROC
 
+	; If bres_exit_right and read_vertex_right are on different pages, then some branches will be slow
+	.ASSERT	>bres_exit_right = >read_vertex_right, warning, "Bresenham routine branches cross page boundaries"
 	; Cleans up after we've stepped through a whole tile
 	.PROC	bres_exit_right
 		STY bres_current_x_r
@@ -2332,7 +2031,7 @@ exit:
 	:	CPY bres_target_x_r
 		BEQ read_vertex_right
 		INY
-		CLC
+	;	CLC	;.assert(pscarry == 0)
 		ADC bres_slope_r
 		BCC :-
 			STY right_edges + $08 * RASTERIZE_ROWS, X
@@ -2414,6 +2113,7 @@ exit:
 	@get_y:
 		INY
 		LAX (poly_ptr), Y
+		STY right_index
 		SEC
 		SBC bres_target_y_r				; Compute dy = target - current. N.B. this is the opposite of normal
 		BCC bottom						; If the target is at or above the current, i.e. dy <= 0, we've reached the bottom of the polygon and need to exit
@@ -2425,7 +2125,6 @@ exit:
 		ADC #$08
 		STA bres_target_y_relative_r	; Reduced y position is relative to the current y position
 		STX bres_target_y_r
-		STY right_index
 		PLA
 
 	@check_steepness:
@@ -2482,16 +2181,14 @@ exit:
 	;
 	;	Takes:
 	;	Returns:
-	;	Clobbers: A, X, Y, $1E - $1F
+	;	Clobbers: A, X, Y, $1A - $1F
 	.PROC	rasterize_tile_row
-		STA $4448
-		RTS
-
-
 		leftmost_tile		:= leftmost_pixel
 		rightmost_tile		:= rightmost_pixel
-		nametable_ptr		:= $1E	; And $1F
 
+		STA $4448
+
+		; Get leftmost tile that needs to be rasterized in the current row
 	set_leftmost_tile:
 		LDA leftmost_pixel
 		LSR
@@ -2499,6 +2196,7 @@ exit:
 		LSR
 		STA leftmost_tile
 
+		; Get rightmost tile that needs to be rasterized in the current row
 	set_rightmost_tile:
 		LDA rightmost_pixel
 		LSR
@@ -2506,88 +2204,235 @@ exit:
 		LSR
 		STA rightmost_tile
 
+		; Get pointer to the row in the nametable buffer that we're currently rasterizing
+		; This can then be indexed by the current tile position within the row
 	set_nametable_ptr:
 		LDX tile_row
 		LDA screen_lo, X
+		CLC
+		ADC #<nametable_buffer
 		STA nametable_ptr + 0
 		LDA screen_hi, X
-		CLC
 		ADC #>nametable_buffer
 		STA nametable_ptr + 1
 
-	loop:
-		LDY leftmost_tile
-		INC leftmost_tile
-		LDA (nametable_ptr), Y
-		BEQ @allocate_new
-		CMP allocated_opaque_patterns
-		BCC loop
-	@modify_existing:
+		; Hi bytes of mask pointers never change, so we set them ahead of time
+	set_mask_ptr_hibytes:
+		LDA #>left_edge_mask_table
+		STA left_edge_mask_ptr + 1
+		LDA #>right_edge_mask_table
+		STA right_edge_mask_ptr + 1
 
-	@allocate_new:
-	
+		; Begin rasterizing tiles starting from rightmost_tile, moving leftwards
+	iterate_right:
+		LDY rightmost_tile
+	@loop:
+		; Setup values for the lo bytes of mask pointers, based on the negated pixel position of the rightmost tile
+		LDA mask_index_table, Y
+		STA left_edge_mask_ptr + 0
+		STA right_edge_mask_ptr + 0
+
+		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
+		LDA (nametable_ptr), Y
+		CMP ::next_opaque_pattern_index
+		BCS @loop_check
+
+		; Rasterize the current tile to a temporary alpha buffer
+		JSR rasterize_tile
+		LDY rightmost_tile
+		; If rasterize_tile returned with carry set, then we've hit a fully opaque tile and must break out of the loop
+		BCS @break
+		JSR write_partial_tile
+
+	@loop_check:
+		DEC rightmost_tile
+		LDY rightmost_tile
+		CPY leftmost_tile
+		BCS @loop
+
+		RTS
+	@break:
+
+		; If we've encountered a fully opaque tile when rasterizing from the right, we can begin rasterizing from leftmost_tile, moving rightwards
+	iterate_left:
+		LDY leftmost_tile
+	@loop:
+		; Setup values for the lo bytes of mask pointers, based on the negated pixel position of the leftmost tile
+		LDA mask_index_table, Y
+		STA left_edge_mask_ptr + 0
+		STA right_edge_mask_ptr + 0
+
+		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
+		LDA (nametable_ptr), Y
+		CMP next_opaque_pattern_index
+		BCS @loop_check
+
+		; Rasterize the current tile to a temporary alpha buffer
+		JSR rasterize_tile
+		LDY leftmost_tile
+		; If rasterize_tile returned with carry set, then we've hit a fully opaque tile and must break out of the loop
+		BCS	@break
+		JSR write_partial_tile
+
+		; In this case, we don't actually have a loop condition to check, since we know that we'll eventually encounter a fully opaque tile
+	@loop_check:
+		INC leftmost_tile
+		LDY leftmost_tile
+		JMP @loop
+	@break:
+
+		; Once we've encountered a fully opaque tile from both sides, we can fill between the two
+	fill_opaque:
+		LDY rightmost_tile
+	@loop:
+		JSR write_opaque_tile
+		DEC rightmost_tile
+		LDY rightmost_tile
+		CPY leftmost_tile
+		BCS @loop
+
+		RTS
 	.ENDPROC
 
-; Rasterizes an entire tile row based on the contents of left_edges and right_edges
-;
-;
-;rasterize_tile_row:
-;	LDA #$80
-;	ADC #$80			; assert(psoverflow == 1)
-;	LDY #$07
-;@loop:
-;	LDA left_edges, Y
-;	LDX #%11111000
-;	AXS #$00
-;	BEQ :+				; Invert this condition to increase typical case speed by 2 cycles?
-;		LDA #$FF
-;		BCC @next
-;		LDA #$00
-;		BEQ :++
-;:	AND #%00000111
-;	TAX
-;	LDA lmask_table, X
-;:	STA temp
-;
-;	LDA right_edges, Y
-;	LDX #%11111000
-;	AXS #$00
-;	BEQ :+
-;		LDA #$FF		; Maybe pull this out into its own thing, after the BCS? Same w/ above. Saves 4 cycles typically
-;		BCS @next
-;		LDA #$00
-;		BEQ :++
-;:	AND #%00000111
-;	TAX
-;	LDA rmask_table, X
-;:	ORA temp
-;
-;@next:
-;	BEQ :+
-;		CLV
-;:	STA alpha_buffer, Y
-;	DEY
-;	BPL @loop
-;	BVC rasterize_tile_row
+	;
+	;	Takes: Leftmost pixels in left_edges, rightmost pixels in right_edges, ...
+	;	Returns: Alpha mask in tile_buffer_alpha, C = 1 if tile is fully opaque, C = 0 otherwise
+	;	Clobbers: A, X, Y
+	.PROC	rasterize_tile
+		LDX #$FF
+	.REPEAT	8, i
+		LDY ::left_edges + i
+		LDA (left_edge_mask_ptr), Y
+		LDY ::right_edges + i
+		AND (right_edge_mask_ptr), Y
+		.IF	i < 7
+			AXS #$00						; X = X & alpha_mask. This ensures that X = $FF iff all mask slivers are fully opaque
+		.ELSE
+			AXS #$FF						; For the final iteration, also subtract $FF. This leaves C = 1 iff all mask slivers are fully opaque
+		.ENDIF
+		STA ::tile_buffer_alpha + i
+	.ENDREP
+		RTS
+	.ENDPROC
+	; Okay, hear me out: left_edges and right_edges take the role of the pointers instead, and the current pixel position goes in Y
+	; This saves 3 * 2 * 8 = 48 cycles per tile rasterized. It complicates the bresenham stepping routines though... at least increases by 2 * 8 * 2 = 32 cycles
+	; when duplicating the INX. Probably still worth it, though
+	; TODO: This
 
-	.PUSHSEG
-		.RODATA
-		left_routine_table_lo:
-		.LOBYTES	bres_routine_left_yn, bres_routine_left_xn
-		.LOBYTES	bres_routine_left_yp, bres_routine_left_xp
+	;
+	;	Takes: Index into current nametable row in Y
+	;	Returns: Nothing
+	;	Clobbers: A, X, Y
+	.PROC	write_partial_tile
+		LAX (nametable_ptr), Y
+		BEQ :+
+			JMP @update_existing_tile
+	:	; If existing tile is blank, we must allocate a new one
+	@allocate_new_tile:
+		LAX next_partial_pattern_index
+		INC next_partial_pattern_index
+		STA (nametable_ptr), Y
 
-		left_routine_table_hi:
-		.HIBYTES	bres_routine_left_yn, bres_routine_left_xn
-		.HIBYTES	bres_routine_left_yp, bres_routine_left_xp
+		LDY poly_color
+		.REPEAT	8, i
+			LDA ::tile_buffer_alpha + i
+			EOR #$FF
+			STA .IDENT(.SPRINTF("pattern_buffer_alpha_%d", i)), X
 
-		right_routine_table_lo:
-		.LOBYTES	bres_routine_right_xn, bres_routine_right_yn
-		.LOBYTES	bres_routine_right_xp, bres_routine_right_yp
+			EOR #$FF
+			AND .IDENT(.SPRINTF("color_table_%d", i)), Y
+			STA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+		.ENDREP
+		RTS
 
-		right_routine_table_hi:
-		.HIBYTES	bres_routine_right_xn, bres_routine_right_yn
-		.HIBYTES	bres_routine_right_xp, bres_routine_right_yp
-	.POPSEG
+		; Otherwise, we must modify an existing tile
+	@update_existing_tile:
+		LDY poly_color
+		.REPEAT	8, i
+			; Compute intersection between opaque pixels of tile buffer, and transparent pixels of pattern buffer
+			LDA ::tile_buffer_alpha + i
+			AND .IDENT(.SPRINTF("pattern_buffer_alpha_%d", i)), X
+			; If there is no intersection, we can skip to the next sliver
+			BEQ :+
+			; Otherwise, flip transparent pixels in pattern buffer that overlap with opaque pixels of mask
+			STA ::temp_mask
+			EOR .IDENT(.SPRINTF("pattern_buffer_alpha_%d", i)), X
+			STA .IDENT(.SPRINTF("pattern_buffer_alpha_%d", i)), X
+
+			; Apply mask to lo bitplane of current color sliver, and combine with existing lo bitplane of pattern buffer
+			LDA ::temp_mask
+			AND .IDENT(.SPRINTF("color_table_%d", i)), Y
+			ORA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+			STA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+		:
+		.ENDREP
+		RTS
+	.ENDPROC
+
+	;
+	;	Takes: Index into current nametable row in Y
+	;	Returns: Nothing
+	;	Clobbers: A, X, Y
+	.PROC	write_opaque_tile
+		LAX (nametable_ptr), Y
+		BNE @update_existing_tile
+		; If existing tile is blank, all we need to do is update the nametable buffer
+	@allocate_new_tile:
+		LDX poly_color
+		LDA opaque_tile_indices, X
+		; If the current color already has an entry in opaque_tile_indices, we can write that to the nametable buffer
+		BNE :+
+			; Otherwise we must allocate a new one, and write that
+			LDA next_opaque_pattern_index
+			DEC next_opaque_pattern_index
+			STA opaque_tile_indices, X
+	:	STA (nametable_ptr), Y
+		RTS
+
+		; Otherwise, we must modify an existing tile
+	@update_existing_tile:
+		LDY poly_color
+		.REPEAT	8, i
+			; Use transparent pixels in current sliver as a mask directly
+			LDA .IDENT(.SPRINTF("pattern_buffer_alpha_%d", i)), X
+			; We can skip updating this sliver if there are no transparent pixels
+			BEQ :+
+
+			; Apply mask to lo bitplane of current color sliver, and combine with existing lo bitplane of pattern buffer
+			AND .IDENT(.SPRINTF("color_table_%d", i)), Y
+			ORA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+			STA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+
+			; Update pattern buffer to reflect that all pixels in this sliver are now opaque
+			LDA #$00
+			STA .IDENT(.SPRINTF("pattern_buffer_alpha_%d", i)), X
+		:
+		.ENDREP
+		RTS
+	.ENDPROC
+
+	; Bresenham routine pointer tables, one entry for each downward facing octant
+	left_routine_table_lo:
+	.LOBYTES	bres_routine_left_yn, bres_routine_left_xn
+	.LOBYTES	bres_routine_left_yp, bres_routine_left_xp
+
+	left_routine_table_hi:
+	.HIBYTES	bres_routine_left_yn, bres_routine_left_xn
+	.HIBYTES	bres_routine_left_yp, bres_routine_left_xp
+
+	right_routine_table_lo:
+	.LOBYTES	bres_routine_right_xn, bres_routine_right_yn
+	.LOBYTES	bres_routine_right_xp, bres_routine_right_yp
+
+	right_routine_table_hi:
+	.HIBYTES	bres_routine_right_xn, bres_routine_right_yn
+	.HIBYTES	bres_routine_right_xp, bres_routine_right_yp
+
+	; Helper table to compute lo bytes of mask pointers. Converts a tile position to a negated pixel position
+	mask_index_table:
+	.REPEAT	32, i
+		.LOBYTES -(i << 3)
+	.ENDREP
 .ENDPROC
 
 ; Draws a line from (x0, y0) to (x1, y1) using bresenham's algorithm
@@ -2772,7 +2617,27 @@ bres_routine_table_hi:
 
 
 .RODATA
-; Need to rename these, they're multiplication tables for indexing into the screen buffer
+; TODO: describe this
+.ALIGN	256
+left_edge_mask_table:
+.REPEAT	256, i
+	.BYTE	$FF
+.ENDREP
+.REPEAT	256, i
+	.BYTE	$FF >> i
+.ENDREP
+
+; TODO: describe this
+.ALIGN	256
+right_edge_mask_table:
+.REPEAT	256, i
+	.BYTE	$00
+.ENDREP
+.REPEAT	256, i
+	.BYTE	($FF >> i) ^ $FF
+.ENDREP
+
+; TODO: Need to rename these, they're multiplication tables for indexing into the screen buffer
 screen_lo:
 .REPEAT SCREEN_HEIGHT_TILES, i
 	.LOBYTES	SCREEN_WIDTH_TILES * i
@@ -2780,6 +2645,21 @@ screen_lo:
 screen_hi:
 .REPEAT	SCREEN_HEIGHT_TILES, i
 	.HIBYTES	SCREEN_WIDTH_TILES * i
+.ENDREP
+
+; Toffirolla dither patterns. This is really, really cool. May benefit from being modified slightly for 2 phase dot crawl? Probably not though
+; TODO: Give credit/ask permission
+.REPEAT	8, i
+	.ident(.sprintf("color_table_%d", i)):
+	.LOBYTES	%0000000000000000 >> i
+	.LOBYTES	%0001000000010000 >> i
+	.LOBYTES	%0011000000110000 >> i
+	.LOBYTES	%0111000001110000 >> i
+	.LOBYTES	%1111000011110000 >> i
+	.LOBYTES	%1111000111110001 >> i
+	.LOBYTES	%1111001111110011 >> i
+	.LOBYTES	%1111011111110111 >> i
+	.LOBYTES	%1111111111111111 >> i
 .ENDREP
 
 ; Cube model

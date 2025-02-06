@@ -48,7 +48,7 @@ init_pattern:
 	INX
 	BNE :-
 
-	LDA #PPU::RENDER_SP
+	LDA #PPU::RENDER_SP | PPU::RENDER_BG
 	STA soft_ppumask
 	LDA #PPU::DEFAULT_CTRL
 	STA soft_ppuctrl
@@ -117,7 +117,7 @@ init_pattern:
 .RODATA
 .PROC	test_poly
 .BYTE	$0B
-.BYTE	$00
+.BYTE	$08
 .BYTE	$80, $40
 .BYTE	$C0, $80
 .BYTE	$80, $C0
@@ -179,6 +179,14 @@ forever:
 			LDA test_poly_buffer + 0
 			SBC #$00
 	:	STA $FF
+:	LDA buttons_down
+	AND #BUTTON_SELECT
+	BEQ :+
+		INC test_poly_buffer + 1
+:	LDA buttons_down
+	AND #BUTTON_START
+	BEQ :+
+		DEC test_poly_buffer + 1
 :
 
 
@@ -187,8 +195,8 @@ forever:
 	LDA #>test_poly_buffer
 	STA $01
 
-	LDA #PPU::GRAYSCALE
-	ORA soft_ppuctrl
+	LDA #PPU::RED_EMPHASIS
+	ORA soft_ppumask
 	STA PPU::MASK
 	JSR rasterize_poly
 	LDA soft_ppumask
