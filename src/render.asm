@@ -174,7 +174,6 @@
 ;		* Needs to take a constant time
 
 RASTERIZE_ROWS	= 1	; Number of tile rows to be rasterized at a time
-NUM_SHADES		= 9	; Number of color shades
 
 .ZEROPAGE
 display_list_indices:			.RES 32
@@ -1676,9 +1675,9 @@ inner_loop:
 	RTS
 .ENDPROC
 
-;
-;	Takes: Pointer to polygon struct in $00 - $01, with vertices stored in clockwise order, sorted such that the topmost vertex is first, preferring the leftmost 
-;		   vertex if ambiguous.
+; Rasterizes a single polygon to nametable_buffer and pattern_buffer. Vertices should be stored in clockwise order, sorted such that the topmost vertex is first,
+; preferring the leftmost vertex if ambiguous.
+;	Takes: Pointer to screenspace polygon struct in $00 - $01
 ;	Returns: Nothing
 ;	Clobbers: A, X, Y, $00 - $1F
 .PROC	rasterize_poly
@@ -1715,31 +1714,6 @@ inner_loop:
 	right_edge_mask_ptr			:= $1A	; And $1B
 	left_edge_mask_ptr			:= $1C	; And $1D
 	nametable_ptr				:= $1E	; And $1F
-
-	; Temp stuff
-	LDA #$01
-	STA ::next_partial_pattern_index
-	LDA #RENDER_MAX_TILES - 1
-	STA ::next_opaque_pattern_index
-
-	LDA #$00
-	LDX #$00
-:	STA opaque_tile_indices, X
-	INX
-	CPX #NUM_SHADES
-	BNE :-
-
-	; Clear nametable buffer
-	LDA #$00
-	LDX #$00
-	@loop:
-	.REPEAT	::SCREEN_HEIGHT_TILES, i
-		STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
-	.ENDREP
-	INX
-	CPX #::SCREEN_WIDTH_TILES
-	BNE @loop
-	; End temp stuff
 
 	LDY #$00
 get_size:
@@ -1805,7 +1779,7 @@ loop:
 
 	; Step along the right and left edges, breaking out of the loop if either reaches the bottommost vertex (i.e. return with carry set)
 	JSR step_bres_right
-	BCS read_final_left_vertex	; If we've reached the bottom on the right side, i.e. C = 1, we must read step along the left side one last time before rasterization
+	BCS read_final_left_vertex	; If we've reached the bottom on the right side, i.e. C = 1, we must step along the left side one last time before rasterization
 	JSR step_bres_left
 	BCC loop
 
@@ -1824,6 +1798,9 @@ read_final_left_vertex:
 			LDX bres_current_y_l
 :
 
+	; Similarly to prefill_edges, we need to fill unused entries of left_edges and right_edges such that they won't be rasterized
+	; However, due to fixed-point imprecision in the stepping algorithm, it is not guaranteed that left_edges and right_edges will agree on which entries are
+	; unused. For this reason, we must begin filling at the row with the earliest unused edge.
 postfill_edges:
 	LDA #$00
 	LDY #$FF
@@ -1991,7 +1968,7 @@ exit:
 	.ENDPROC
 
 	; Initiates a step along the left edge
-	;	Takes:
+	;	Takes: Current residual, X position, and Y position in bres_current_residual_l, bres_current_x_l, bres_current_y_l respectively
 	;	Returns: C = 0 if a full row was processed, C = 1 if the bottom of the polygon was reached
 	;	Clobbers: A, X, Y, $1E - $1F
 	.PROC	step_bres_left
@@ -2084,8 +2061,8 @@ exit:
 	; Reads a vertex from poly_ptr at right_index, and sets up right bresenham properties based the current position and the values read
 	; Note: Assumes that bres_target_x_r and bres_target_y_r represent the current position. Assumes that right index points to the last byte of the previous vertex, 
 	;		and leaves it pointing at the last byte of the current vertex
-	;	Takes:
-	;	Returns:
+	;	Takes: Current X position in Y, current Y position in X
+	;	Returns: C = 1 if next vertex is higher than current vertex
 	;	Clobbers: A, X, Y, $1E - $1F
 	.PROC	read_vertex_right
 		routine_index		:= $1F
@@ -2159,7 +2136,7 @@ exit:
 	.ENDPROC
 
 	; Initiates a step along the right edge
-	;	Takes:
+	;	Takes: Current residual, X position, and Y position in bres_current_residual_r, bres_current_x_r, bres_current_y_r respectively
 	;	Returns: C = 0 if a full row was processed, C = 1 if the bottom of the polygon was reached
 	;	Clobbers: A, X, Y, $1E - $1F
 	.PROC	step_bres_right
@@ -2178,15 +2155,14 @@ exit:
 	:	JMP (bres_routine_ptr_r)
 	.ENDPROC
 
-	;
-	;	Takes:
-	;	Returns:
+	; Rasterizes a row of tiles based on the contents of left_edges and right_edges
+	;	Takes: Leftmost and rightmost pixels touched by the edge steppers in leftmost_pixel and rightmost_pixel, leftmost and rightmost pixels touched by the
+	;	       edge steppers in each row in left_edges and right_edges
+	;	Returns: Nothing
 	;	Clobbers: A, X, Y, $1A - $1F
 	.PROC	rasterize_tile_row
 		leftmost_tile		:= leftmost_pixel
 		rightmost_tile		:= rightmost_pixel
-
-		STA $4448
 
 		; Get leftmost tile that needs to be rasterized in the current row
 	set_leftmost_tile:
@@ -2198,6 +2174,7 @@ exit:
 
 		; Get rightmost tile that needs to be rasterized in the current row
 	set_rightmost_tile:
+		DEC rightmost_pixel		; Rasterization is off by one. Omitting this results in blank tiles being allocated and rasterized
 		LDA rightmost_pixel
 		LSR
 		LSR
@@ -2223,7 +2200,39 @@ exit:
 		LDA #>right_edge_mask_table
 		STA right_edge_mask_ptr + 1
 
-		; Begin rasterizing tiles starting from rightmost_tile, moving leftwards
+		; Begin rasterizing tiles starting from leftmost_tile, moving rightwards
+	iterate_left:
+		LDY leftmost_tile
+	@loop:
+		; Setup values for the lo bytes of mask pointers, based on the negated pixel position of the leftmost tile
+		LDA mask_index_table, Y
+		STA left_edge_mask_ptr + 0
+		STA right_edge_mask_ptr + 0
+
+		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
+		LDA (nametable_ptr), Y
+		CMP ::next_opaque_pattern_index
+		BCS @loop_check
+
+		; Rasterize the current tile to a temporary alpha buffer
+		JSR rasterize_tile
+		LDY leftmost_tile
+		; If rasterize_tile returned with carry set, then we've hit a fully opaque tile and must break out of the loop
+		BCS	@break
+		JSR write_partial_tile
+
+		; Rasterize until we've passed the rightmost tile in a given row
+	@loop_check:
+		INC leftmost_tile
+		LDY leftmost_tile
+		CPY rightmost_tile
+		BCC @loop
+		BEQ @loop
+
+		RTS
+	@break:
+
+		; If we've encountered a fully opaque tile when rasterizing from the left, we can begin rasterizing from rightmost_tile, moving leftwards
 	iterate_right:
 		LDY rightmost_tile
 	@loop:
@@ -2244,40 +2253,10 @@ exit:
 		BCS @break
 		JSR write_partial_tile
 
+		; In this case, we don't actually have a loop condition to check, since we know that we'll eventually encounter a fully opaque tile
 	@loop_check:
 		DEC rightmost_tile
 		LDY rightmost_tile
-		CPY leftmost_tile
-		BCS @loop
-
-		RTS
-	@break:
-
-		; If we've encountered a fully opaque tile when rasterizing from the right, we can begin rasterizing from leftmost_tile, moving rightwards
-	iterate_left:
-		LDY leftmost_tile
-	@loop:
-		; Setup values for the lo bytes of mask pointers, based on the negated pixel position of the leftmost tile
-		LDA mask_index_table, Y
-		STA left_edge_mask_ptr + 0
-		STA right_edge_mask_ptr + 0
-
-		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
-		LDA (nametable_ptr), Y
-		CMP next_opaque_pattern_index
-		BCS @loop_check
-
-		; Rasterize the current tile to a temporary alpha buffer
-		JSR rasterize_tile
-		LDY leftmost_tile
-		; If rasterize_tile returned with carry set, then we've hit a fully opaque tile and must break out of the loop
-		BCS	@break
-		JSR write_partial_tile
-
-		; In this case, we don't actually have a loop condition to check, since we know that we'll eventually encounter a fully opaque tile
-	@loop_check:
-		INC leftmost_tile
-		LDY leftmost_tile
 		JMP @loop
 	@break:
 
@@ -2294,8 +2273,10 @@ exit:
 		RTS
 	.ENDPROC
 
-	;
-	;	Takes: Leftmost pixels in left_edges, rightmost pixels in right_edges, ...
+	; Rasterizes a single tile mask to tile_buffer_alpha. It does this sliver by sliver by performing a table lookup indexed by the left edge plus the inverse of the
+	; tiles X position to get a partial mask representing the contribution from the left edge, and masking that against the contribution from the right edge, which is
+	; similarly calculated.
+	;	Takes: Leftmost pixels in left_edges, rightmost pixels in right_edges, effective current X position in lo bytes of left_edge_mask_ptr and right_edge_mask_ptr
 	;	Returns: Alpha mask in tile_buffer_alpha, C = 1 if tile is fully opaque, C = 0 otherwise
 	;	Clobbers: A, X, Y
 	.PROC	rasterize_tile
@@ -2319,7 +2300,7 @@ exit:
 	; when duplicating the INX. Probably still worth it, though
 	; TODO: This
 
-	;
+	; Writes a partially opaque tile to pattern_buffer and nametable_buffer based on the contents of tile_buffer_alpha
 	;	Takes: Index into current nametable row in Y
 	;	Returns: Nothing
 	;	Clobbers: A, X, Y
@@ -2369,7 +2350,7 @@ exit:
 		RTS
 	.ENDPROC
 
-	;
+	; Writes a fully opaque tile to nametable_buffer
 	;	Takes: Index into current nametable row in Y
 	;	Returns: Nothing
 	;	Clobbers: A, X, Y
@@ -2431,7 +2412,7 @@ exit:
 	; Helper table to compute lo bytes of mask pointers. Converts a tile position to a negated pixel position
 	mask_index_table:
 	.REPEAT	32, i
-		.LOBYTES -(i << 3)
+		.LOBYTES (i << 3) ^ $FF
 	.ENDREP
 .ENDPROC
 

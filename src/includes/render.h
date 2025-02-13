@@ -4,6 +4,9 @@ RENDER_H = 1
 ; Maximum number of tiles that the rasterizing engine can allocate
 RENDER_MAX_TILES			= 128
 
+; Number of color shades
+NUM_SHADES					= 9
+
 ; Maximum number of vertices that a polygon can have
 RENDER_MAX_VERTICES			= 10
 
@@ -69,7 +72,12 @@ NEAR_PLANE					= $0100
 .GLOBAL		render_frame
 
 ; For testing
-.GLOBAL		draw_line, rasterize_poly
+.GLOBAL		draw_line, rasterize_poly, opaque_tile_indices, nametable_buffer
+.GLOBALZP	next_opaque_pattern_index, next_partial_pattern_index
+
+.REPEAT	8, i
+	.GLOBAL	.ident(.sprintf("pattern_buffer_%d", i))
+.ENDREP
 
 ;
 .GLOBALZP	camera_pitch_hi, camera_pitch_lo, camera_yaw_hi, camera_yaw_lo, camera_roll_hi, camera_roll_lo

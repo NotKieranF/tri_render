@@ -189,20 +189,97 @@ forever:
 		DEC test_poly_buffer + 1
 :
 
+	; Clear partial tile allocations
+	LDA #$01
+	STA next_partial_pattern_index
 
+	; Clear opaque tile allocations
+	LDA #RENDER_MAX_TILES - 1
+	STA next_opaque_pattern_index
+
+	LDA #$00
+	LDX #$00
+:	STA opaque_tile_indices, X
+	INX
+	CPX #NUM_SHADES
+	BNE :-
+
+	; Clear nametable buffer
+	LDA #$00
+	LDX #$00
+	@loop:
+	.REPEAT	::SCREEN_HEIGHT_TILES, i
+		STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+	.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BNE @loop
+
+	; Setup poly pointer
 	LDA #<test_poly_buffer
 	STA $00
 	LDA #>test_poly_buffer
 	STA $01
 
-	LDA #PPU::RED_EMPHASIS
+	; Rasterize polygon with performance highlighting
+	LDA #PPU::RED_EMPHASIS | PPU::GRAYSCALE
 	ORA soft_ppumask
 	STA PPU::MASK
 	JSR rasterize_poly
 	LDA soft_ppumask
 	STA PPU::MASK
 
+	; Transfer gfx buffers
+	LDA #$00
+	STA soft_ppumask
 	JSR wait_for_nmi
+
+	; Transfer nametable buffer
+asd:
+	LDA #>$2000
+	STA PPU::ADDR
+	LDA #<$2000
+	STA PPU::ADDR
+
+	LDA #<(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
+	STA $00 + 0
+	LDA #>(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
+	STA $00 + 1
+	LDY #$100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES)
+	LDX #>(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES - 1) + 1
+@loop:
+	LDA ($00), Y
+	STA PPU::DATA
+	INY
+	BNE @loop
+	INC $00 + 1
+	DEX
+	BNE @loop
+
+	; Transfer pattern buffer
+ad2:
+	LDA #>$0000
+	STA PPU::ADDR
+	LDA #<$0000
+	STA PPU::ADDR
+	LDX #$00
+@loop:
+	.REPEAT	8, i
+		LDA .ident(.sprintf("pattern_buffer_%d", i)), X
+		STA PPU::DATA
+	.ENDREP
+	LDA #$00
+	.REPEAT	8, i
+		STA PPU::DATA
+	.ENDREP
+	INX
+	CPX next_partial_pattern_index
+	BNE @loop
+
+	LDA #PPU::RENDER_SP | PPU::RENDER_BG
+	STA soft_ppumask
+	JSR wait_for_nmi
+
 	JSR read_controller
 	JMP forever
 .ENDSCOPE
@@ -979,15 +1056,15 @@ main_loop:
 ;.ENDPROC
 
 default_pal:
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
 
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
 
 balz:
 .INCBIN	"balz.chr"
