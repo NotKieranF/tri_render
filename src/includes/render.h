@@ -4,6 +4,9 @@ RENDER_H = 1
 ; Maximum number of tiles that the rasterizing engine can allocate
 RENDER_MAX_TILES			= 128
 
+; Number of color shades
+NUM_SHADES					= 9
+
 ; Maximum number of vertices that a polygon can have
 RENDER_MAX_VERTICES			= 10
 
@@ -68,8 +71,42 @@ NEAR_PLANE					= $0100
 .GLOBAL		plot_point
 .GLOBAL		render_frame
 
+; For testing
+.GLOBAL		draw_line, rasterize_poly, opaque_tile_indices, nametable_buffer
+.GLOBALZP	next_opaque_pattern_index, next_partial_pattern_index
+
+.REPEAT	8, i
+	.GLOBAL	.ident(.sprintf("pattern_buffer_%d", i))
+.ENDREP
+
 ;
 .GLOBALZP	camera_pitch_hi, camera_pitch_lo, camera_yaw_hi, camera_yaw_lo, camera_roll_hi, camera_roll_lo
 .GLOBALZP	camera_pos_x_sub, camera_pos_x_lo, camera_pos_x_hi, camera_pos_y_sub, camera_pos_y_lo, camera_pos_y_hi, camera_pos_z_sub, camera_pos_z_lo, camera_pos_z_hi
+
+; Mesh defining macros
+; Radius is the maximum distance between a vertex and the origin
+;
+.MACRO	MESH	radius, vertex_list_x, vertex_list_y, vertex_list_z, face_list, line_list
+	.BYTE	radius
+	.ADDR	vertex_list_x
+	.ADDR	vertex_list_y
+	.ADDR	vertex_list_z
+	.ADDR	face_list
+	.ADDR	line_list
+.ENDMAC
+
+;
+.MACRO	FACE	normal, barycenter, color, vertex_count, vertex_list
+	.BYTE	normal
+	.BYTE	(color & $0F) << 4 | (vertex_count & $0F)
+	.BYTE	vertex_list
+	.BYTE	barycenter
+.ENDMAC
+
+; 
+.MACRO	LINE	color, vertex_count, vertex_list
+	.BYTE	(color & $0F) << 4 | (vertex_count & $0F)
+	.BYTE	vertex_list
+.ENDMAC
 
 .ENDIF

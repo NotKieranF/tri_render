@@ -23,7 +23,7 @@ OBJECT_FILES := $(patsubst %.asm, build/%.o, $(notdir $(ASSEMBLY_FILES)))
 .PHONY: clean default dir $(ASSEMBLY_FILES)
 
 default: dir $(ASSEMBLY_FILES)
-	@ld65 $(OBJECT_FILES) $(LIBRARIES) -C $(CFG_FILE) -m $(MAP_NAME) --dbgfile $(DBG_NAME) -o $(ROM_NAME) $(LINK_ARGS)
+	@ld65 $(LINK_ARGS) $(OBJECT_FILES) $(LIBRARIES) -C $(CFG_FILE) -m $(MAP_NAME) --dbgfile $(DBG_NAME) -o $(ROM_NAME)
 
 mesen: default
 	@Mesen $(ROM_NAME) $(MESEN_ARGS) &

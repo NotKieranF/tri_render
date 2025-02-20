@@ -48,93 +48,241 @@ init_pattern:
 	INX
 	BNE :-
 
-	LDA #PPU::RENDER_SP
+	LDA #PPU::RENDER_SP | PPU::RENDER_BG
 	STA soft_ppumask
 	LDA #PPU::DEFAULT_CTRL
 	STA soft_ppuctrl
 	STA PPU::CTRL
 
 
-;	multiplicand := $10
-;	multiplier := $11
-;	product := $13
+; Testing
+.SCOPE
+;	x0		:= $F0
+;	y0		:= $F1
+;	x1		:= $F2
+;	y1		:= $F3
 ;
-;test_mul_16x8bit_signed:
-;	JSR math_init
-;	LDA #$00
-;	STA multiplicand + 0
-;	STA multiplier + 0
-;	STA multiplier + 1
-;@outer_loop:
-;	LDA multiplier + 0
-;	LDX multiplier + 1
-;	JSR set_mul_16x8bit_signed
-;@inner_loop:
-;	LDY multiplicand
-;	JSR mul_16x8bit_signed
-;	STA product + 2
-;	STY product + 1
-;	STX product + 0
-;	STA $4444
-;	INC multiplicand
-;	BNE @inner_loop
-;
-;	INC multiplier + 0
-;	BNE @outer_loop
-;	INC multiplier + 1
-;	BNE @outer_loop
-
-
-;	multiplicand := $10
-;	multiplier := $11
-;	product := $13
-;
-;test_fastmul:
-;	JSR math_init
+;	LDA #$80
+;	STA x0
+;	STA y0
 ;	LDA #$C0
-;	STA multiplicand + 0
-;	STA multiplier + 0
-;@outer_loop:
-;	LDA multiplier + 0
-;	SET_FAST_MUL
-;@inner_loop:
-;	LDY multiplicand
-;	FAST_MUL product + 0
-;	STA product + 1
-;	STA $4444
-;	INC multiplicand
-;	LDA #$40
-;	CMP multiplicand
-;	BNE @inner_loop
-;	LDA #$C0
-;	STA multiplicand
-;
-;	INC multiplier
-;	LDA #$40
-;	CMP multiplier
-;	BNE @outer_loop
+;	STA x1
+;	STA y1
+;forever:
+;	LDA buttons_held
+;	BIT identity + BUTTON_LEFT
+;	BEQ :+
+;		DEC x1
+;:	BIT identity + BUTTON_RIGHT
+;	BEQ :+
+;		INC x1
+;:	BIT identity + BUTTON_UP
+;	BEQ :+
+;		DEC y1
+;:	BIT identity + BUTTON_DOWN
+;	BEQ :+
+;		INC y1
+;:	
+;	LDA x0
+;	STA $1C
+;	LDA y0
+;	STA $1D
+;	LDA x1
+;	STA $1E
+;	LDA y1
+;	STA $1F
+;	STA $4445
+;	JSR draw_line
+;	STA $4445
 
-;	reciprocal_input := $10
-;	reciprocal_output := $12
-;
-;test_reciprocal:
-;	JSR math_init
+; Test udiv_8x8bit_frac
+;.PROC	test_udiv_8x8bit_frac
 ;	LDA #$00
-;	STA reciprocal_input + 0
-;	STA reciprocal_input + 1
-;@loop:
-;	LDA reciprocal_input + 0
-;	LDX reciprocal_input + 1
-;	JSR reciprocal_16bit_unsigned
-;	STA reciprocal_output + 0
-;	STY reciprocal_output + 1
+;	LDX #$01
+;	STA $FE
+;	STX $FF
+;:	LDA $FE
+;	LDX $FF
+;	JSR udiv_8x8bit_frac
+;	STA $EE
+;	STX $EF
 ;	STA $4444
-;
-;	INC reciprocal_input + 0
-;	BNE @loop
-;
-;	INC reciprocal_input + 1
-;	BNE @loop
+;	INC $FE
+;	BNE :-
+;	INC $FF
+;	BNE :-
+;.ENDPROC
+
+.PUSHSEG
+.RODATA
+.PROC	test_poly
+.BYTE	$0B
+.BYTE	$08
+.BYTE	$80, $40
+.BYTE	$C0, $80
+.BYTE	$80, $C0
+.BYTE	$40, $80
+.BYTE	$20, $60
+.ENDPROC
+
+.BSS
+test_poly_buffer:	.res 32
+
+.POPSEG
+
+	LDX #$00
+:	LDA test_poly, X
+	STA test_poly_buffer, X
+	INX
+	CPX #.SIZEOF(test_poly)
+	BNE :-
+
+	LDA #$02
+	STA $FF
+
+forever:
+	LDX $FF
+	LDA buttons_held
+	AND #BUTTON_UP
+	BEQ :+
+		DEC test_poly_buffer + 1, X
+:	LDA buttons_held
+	AND #BUTTON_DOWN
+	BEQ :+
+		INC test_poly_buffer + 1, X
+:	LDA buttons_held
+	AND #BUTTON_LEFT
+	BEQ :+
+		DEC test_poly_buffer + 0, X
+:	LDA buttons_held
+	AND #BUTTON_RIGHT
+	BEQ :+
+		INC test_poly_buffer + 0, X
+:	LDA buttons_down
+	AND #BUTTON_A
+	BEQ :++
+		LDA $FF
+		CLC
+		ADC #$02
+		CMP test_poly_buffer + 0
+		BCC :+
+			LDA #$02
+	:	STA $FF
+:	LDA buttons_down
+	AND #BUTTON_B
+	BEQ :++
+		LDA $FF
+		SEC
+		SBC #$02
+		CMP #$02
+		BCS :+
+			LDA test_poly_buffer + 0
+			SBC #$00
+	:	STA $FF
+:	LDA buttons_down
+	AND #BUTTON_SELECT
+	BEQ :+
+		INC test_poly_buffer + 1
+:	LDA buttons_down
+	AND #BUTTON_START
+	BEQ :+
+		DEC test_poly_buffer + 1
+:
+
+	; Clear partial tile allocations
+	LDA #$01
+	STA next_partial_pattern_index
+
+	; Clear opaque tile allocations
+	LDA #RENDER_MAX_TILES - 1
+	STA next_opaque_pattern_index
+
+	LDA #$00
+	LDX #$00
+:	STA opaque_tile_indices, X
+	INX
+	CPX #NUM_SHADES
+	BNE :-
+
+	; Clear nametable buffer
+	LDA #$00
+	LDX #$00
+	@loop:
+	.REPEAT	::SCREEN_HEIGHT_TILES, i
+		STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+	.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BNE @loop
+
+	; Setup poly pointer
+	LDA #<test_poly_buffer
+	STA $00
+	LDA #>test_poly_buffer
+	STA $01
+
+	; Rasterize polygon with performance highlighting
+	LDA #PPU::RED_EMPHASIS | PPU::GRAYSCALE
+	ORA soft_ppumask
+	STA PPU::MASK
+	JSR rasterize_poly
+	LDA soft_ppumask
+	STA PPU::MASK
+
+	; Transfer gfx buffers
+	LDA #$00
+	STA soft_ppumask
+	JSR wait_for_nmi
+
+	; Transfer nametable buffer
+asd:
+	LDA #>$2000
+	STA PPU::ADDR
+	LDA #<$2000
+	STA PPU::ADDR
+
+	LDA #<(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
+	STA $00 + 0
+	LDA #>(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
+	STA $00 + 1
+	LDY #$100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES)
+	LDX #>(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES - 1) + 1
+@loop:
+	LDA ($00), Y
+	STA PPU::DATA
+	INY
+	BNE @loop
+	INC $00 + 1
+	DEX
+	BNE @loop
+
+	; Transfer pattern buffer
+ad2:
+	LDA #>$0000
+	STA PPU::ADDR
+	LDA #<$0000
+	STA PPU::ADDR
+	LDX #$00
+@loop:
+	.REPEAT	8, i
+		LDA .ident(.sprintf("pattern_buffer_%d", i)), X
+		STA PPU::DATA
+	.ENDREP
+	LDA #$00
+	.REPEAT	8, i
+		STA PPU::DATA
+	.ENDREP
+	INX
+	CPX next_partial_pattern_index
+	BNE @loop
+
+	LDA #PPU::RENDER_SP | PPU::RENDER_BG
+	STA soft_ppumask
+	JSR wait_for_nmi
+
+	JSR read_controller
+	JMP forever
+.ENDSCOPE
 
 ;	multiplier		:= $10
 ;	multiplicand	:= $12
@@ -238,7 +386,6 @@ init_pattern:
 main_loop:
 	JSR read_controller
 	JSR move_camera
-
 
 	STA $4445
 ;	LDA #PPU::RED_EMPHASIS | PPU::RENDER_SP
@@ -909,15 +1056,15 @@ main_loop:
 ;.ENDPROC
 
 default_pal:
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
 
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
-.BYTE	$0F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
+.BYTE	$3F, $00, $10, $20
 
 balz:
 .INCBIN	"balz.chr"
