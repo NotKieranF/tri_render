@@ -5,6 +5,8 @@
 
 
 
+
+
 .ZEROPAGE
 soft_ppuctrl:		.RES 1	; Soft registers to be copied during vblank
 soft_ppumask:		.RES 1
@@ -16,13 +18,19 @@ oam_index:			.RES 1
 
 
 
+
+
 .SEGMENT	"OAM"
 oam:				.RES 256
 
 
 
+
+
 .SEGMENT	"STACK"
 gfx_buffer:			.RES 160
+
+
 
 
 
