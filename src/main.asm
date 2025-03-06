@@ -22,38 +22,11 @@ pal_buffer:				.RES 32
 
 .CODE
 .PROC main
-
-init_pal:
-	LDA #$3F
-	STA PPU::ADDR
-	LDA #$00
-	STA PPU::ADDR
-
-	LDX #$00
-:	LDA default_pal, X
-	STA PPU::DATA
-	INX
-	CPX #$20
-	BNE :-
-
-init_pattern:
-	LDA #$10
-	STA PPU::ADDR
-	LDA #$00
-	STA PPU::ADDR
-
-	LDX #$00
-:	LDA balz, X
-	STA PPU::DATA
-	INX
-	BNE :-
-
 	LDA #PPU::RENDER_SP | PPU::RENDER_BG
 	STA soft_ppumask
 	LDA #PPU::DEFAULT_CTRL
 	STA soft_ppuctrl
 	STA PPU::CTRL
-
 
 ; Testing
 .SCOPE
@@ -281,7 +254,7 @@ ad2:
 	JSR wait_for_nmi
 
 	JSR read_controller
-	JMP forever
+;	JMP forever
 .ENDSCOPE
 
 ;	multiplier		:= $10
@@ -381,6 +354,48 @@ ad2:
 ;	CMP #$80
 ;	BNE @loop
 
+; Clear ppu address space
+	LDA #$00
+	STA PPU::MASK
+	LDA #>$0000
+	STA PPU::ADDR
+	LDA #<$0000
+	STA PPU::ADDR
+
+	LDX #<$3000
+	LDY #>$3000
+	LDA #$00
+:	STA PPU::DATA
+	DEX
+	BNE :-
+	DEY
+	BNE :-
+
+
+init_pal:
+	LDA #$3F
+	STA PPU::ADDR
+	LDA #$00
+	STA PPU::ADDR
+
+	LDX #$00
+:	LDA default_pal, X
+	STA PPU::DATA
+	INX
+	CPX #$20
+	BNE :-
+
+init_pattern:
+	LDA #$10
+	STA PPU::ADDR
+	LDA #$00
+	STA PPU::ADDR
+
+	LDX #$00
+:	LDA balz, X
+	STA PPU::DATA
+	INX
+	BNE :-
 
 	JSR math_init
 main_loop:
