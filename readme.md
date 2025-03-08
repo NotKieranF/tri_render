@@ -2,6 +2,7 @@
 
 Tri-render is a 3D rendering engine written in 6502 assembly for the Nintendo Entertainment System.
 It is currently a work in progress, and many core features are in active development.
+In particular, `main.asm` is in a state of flux while the code in `render.asm` is being tested.
 That being said, the main branch has a functional point-cloud renderer that renders a model's vertices as sprites on the screen.
 
 # Controls
