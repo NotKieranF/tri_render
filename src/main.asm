@@ -48,9 +48,9 @@ init_pattern:
 	INX
 	BNE :-
 
-	LDA #PPU::RENDER_SP | PPU::RENDER_BG
+	LDA #PPU::MASK::RENDER_SP | PPU::MASK::RENDER_BG
 	STA soft_ppumask
-	LDA #PPU::DEFAULT_CTRL
+	LDA #PPU::CTRL::ENABLE_NMI | PPU::CTRL::BG_PATTERN_L | PPU::CTRL::SP_PATTERN_R
 	STA soft_ppuctrl
 	STA PPU::CTRL
 
@@ -222,7 +222,7 @@ forever:
 	STA $01
 
 	; Rasterize polygon with performance highlighting
-	LDA #PPU::RED_EMPHASIS | PPU::GRAYSCALE
+	LDA #PPU::MASK::R_EMPHASIS | PPU::MASK::GRAYSCALE
 	ORA soft_ppumask
 	STA PPU::MASK
 	JSR rasterize_poly
@@ -234,6 +234,35 @@ forever:
 	STA soft_ppumask
 	JSR wait_for_nmi
 
+	; Destination address for nametable
+	LDA #<$2000
+	STA nametable_buffer_ppu_addr + 0
+	LDA #>$2000
+	STA nametable_buffer_ppu_addr + 1
+
+	; Destination address for patterns
+	LDA #<$0000
+	STA partial_buffer_ppu_addr + 0
+	LDA #>$0000
+	STA partial_buffer_ppu_addr + 1
+
+	;
+	LDA next_partial_pattern_index
+	STA last_partial_pattern_index
+	LDA #$FF
+	STA last_opaque_pattern_index
+
+	;
+	LDA #$01
+	STA graphics_buffers_full
+
+	JSR transfer_coroutine
+; TEMP CODE
+;
+;
+;
+;
+.if 0
 	; Transfer nametable buffer
 asd:
 	LDA #>$2000
@@ -275,8 +304,14 @@ ad2:
 	INX
 	CPX next_partial_pattern_index
 	BNE @loop
+.ENDIF
+; END TEMP CODE
+;
+;
+;
+;
 
-	LDA #PPU::RENDER_SP | PPU::RENDER_BG
+	LDA #PPU::MASK::RENDER_SP | PPU::MASK::RENDER_BG
 	STA soft_ppumask
 	JSR wait_for_nmi
 

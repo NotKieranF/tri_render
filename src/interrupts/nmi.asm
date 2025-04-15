@@ -35,7 +35,9 @@ gfx_buffer:			.RES 160
 
 
 .CODE
+; Actual NMI handler is mostly dummied out
 .PROC	nmi
+save_registers:
 	PHA
 	TXA
 	PHA

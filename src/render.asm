@@ -183,7 +183,14 @@ right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixel
 tile_buffer_alpha:				.RES 8
 temp_mask:						.RES 1	; TODO: fold this into other temp variables
 next_partial_pattern_index:		.RES 1	; Grows upwards from $01
+last_partial_pattern_index:		.RES 1	; ___
 next_opaque_pattern_index:		.RES 1	; Grows downwards from $FF
+last_opaque_pattern_index:		.RES 1	; ___
+graphics_buffers_full:			.RES 1	; ___
+graphics_buffers_empty:			.RES 1	; ___
+nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
+partial_buffer_ppu_addr:		.RES 2	; Start location of current partial pattern buffer in PPU address space
+opaque_buffer_ppu_addr:			.RES 2
 
 ; Camera parameters
 camera_pos_sub:
@@ -241,7 +248,11 @@ poly_buffer_last:				.RES 1
 
 .SEGMENT	"SAVERAM"
 ; Converts color IDs into pattern table indices
+; TODO: This doesn't handle large numbers of unique shades gracefully. Probably a good idea to turn it into a hash-map
 opaque_tile_indices:			.RES NUM_SHADES
+; Converts pattern table indices into color IDs
+; TODO: This is probably excessive in terms of RAM usage
+opaque_tile_buffer:				.RES 256
 
 .ALIGN	256
 ; Pattern table buffers
@@ -2591,6 +2602,108 @@ bres_routine_table_hi:
 	STY oam_index
 
 	RTS
+.ENDPROC
+
+;
+;	Takes:
+;	Returns:
+;	Clobbers:
+.PROC	transfer_coroutine
+	; Check whether graphics buffers are ready to be emptied
+check_buffer_status:
+	LDA graphics_buffers_full
+	BNE :+
+		; Yield if not. Note that this can cause a race condition with NMI, so the B flag must be checked in the NMI handler
+		BRK #$00
+		JMP check_buffer_status
+:	LDA #$00
+	STA graphics_buffers_full
+
+	; Transfer opaque tiles
+transfer_opaque_buffer:
+	LDA opaque_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	LDA opaque_buffer_ppu_addr + 0
+	STA PPU::ADDR
+	LDX last_opaque_pattern_index
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+	LDY opaque_tile_buffer, X
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("color_table_%d", i)), Y
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	BNE @loop
+
+	; Transfer nametable_buffer
+transfer_nametable_buffer:
+	LDA #PPU::CTRL::INC_32 | PPU::CTRL::ENABLE_NMI
+	STA PPU::CTRL
+	LDX #$00
+@loop:
+	LDA nametable_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	TXA
+	CLC
+	ADC nametable_buffer_ppu_addr + 0
+	STA PPU::ADDR
+
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+.REPEAT	::SCREEN_HEIGHT_TILES, i
+	LDA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+	STA PPU::DATA
+.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BCS :+
+		JMP @loop
+:	LDA #PPU::CTRL::INC_1 | PPU::CTRL::ENABLE_NMI
+	STA PPU::CTRL
+
+	; Transfer partial tiles
+transfer_partial_buffer:
+	LDA partial_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	LDA partial_buffer_ppu_addr + 0
+	STA PPU::ADDR
+	LDX #$00
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+;	STX ___		; Later, we'll inform the main thread where we are, so rasterization can be done concurrently
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	CPX last_partial_pattern_index
+	BCC @loop
+
+	; Indicate that graphics buffers are emptied
+	LDA #$01
+	STA graphics_buffers_empty
+
+	; TEMP
+	RTS
+
+	; Endlessly loop
+	JMP transfer_coroutine
 .ENDPROC
 
 
