@@ -5,6 +5,7 @@
 .INCLUDE	"nmi.h"
 .INCLUDE	"math.h"
 .INCLUDE	"objects.h"
+.INCLUDE	"vrc6.h"
 
 ; Overview of rendering pipeline:
 ;	* 
@@ -191,6 +192,16 @@ graphics_buffers_empty:			.RES 1	; ___
 nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
 partial_buffer_ppu_addr:		.RES 2	; Start location of current partial pattern buffer in PPU address space
 opaque_buffer_ppu_addr:			.RES 2
+
+; Coroutine state
+transfer_coroutine_pc:			.RES 2
+transfer_coroutine_ps:			.RES 1
+transfer_coroutine_ppu_addr:	.RES 2
+transfer_coroutine_ppu_ctrl:	.RES 1
+transfer_coroutine_a:			.RES 1
+transfer_coroutine_x:			.RES 1
+transfer_coroutine_y:			.RES 1
+transfer_coroutine_progress:	.RES 1
 
 ; Camera parameters
 camera_pos_sub:
@@ -2618,6 +2629,9 @@ check_buffer_status:
 		JMP check_buffer_status
 :	LDA #$00
 	STA graphics_buffers_full
+	; Initialize a counter that is incremented each time we progress to emptying a new buffer
+	; This is used when shutting down the coroutine to deduce the current value of PPU::ADDR
+	STA transfer_coroutine_progress
 
 	; Transfer opaque tiles
 transfer_opaque_buffer:
@@ -2642,10 +2656,12 @@ transfer_opaque_buffer:
 .ENDREP
 	INX
 	BNE @loop
+	INC transfer_coroutine_progress
 
 	; Transfer nametable_buffer
 transfer_nametable_buffer:
 	LDA #PPU::CTRL::INC_32 | PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
 	STA PPU::CTRL
 	LDX #$00
 @loop:
@@ -2668,7 +2684,9 @@ transfer_nametable_buffer:
 	BCS :+
 		JMP @loop
 :	LDA #PPU::CTRL::INC_1 | PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
 	STA PPU::CTRL
+	INC transfer_coroutine_progress
 
 	; Transfer partial tiles
 transfer_partial_buffer:
@@ -2699,11 +2717,145 @@ transfer_partial_buffer:
 	LDA #$01
 	STA graphics_buffers_empty
 
-	; TEMP
-	RTS
-
 	; Endlessly loop
 	JMP transfer_coroutine
+.ENDPROC
+
+;
+;
+;
+;
+.PROC	init_transfer_coroutine
+	LDA #<transfer_coroutine
+	STA transfer_coroutine_pc + 0
+	LDA #>transfer_coroutine
+	STA transfer_coroutine_pc + 1
+
+	RTS
+.ENDPROC
+
+;
+;	Takes:
+;	Returns:
+;	Clobbers:
+.PROC	startup_transfer_coroutine
+	; Restore stack
+restore_stack:
+	LDA transfer_coroutine_pc + 1
+	PHA
+	LDA transfer_coroutine_pc + 0
+	PHA
+	LDA transfer_coroutine_ps
+	PHA
+
+	; Restore PPU address value
+restore_ppu_addr:
+	LDA transfer_coroutine_ppu_addr + 1
+	STA PPU::ADDR
+	LDA transfer_coroutine_ppu_addr + 0
+	STA PPU::ADDR
+
+	; Restore PPU control value
+restore_ppu_ctrl:
+	LDA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+
+	; Restore registers
+restore_registers:
+	LDA transfer_coroutine_a
+	LDX transfer_coroutine_x
+	LDY transfer_coroutine_y
+
+	RTI
+.ENDPROC
+
+;
+;	Takes:
+;	Returns:
+;	Clobbers:
+.PROC	shutdown_transfer_coroutine
+	; Save registers
+save_registers:
+	STY transfer_coroutine_y
+	STX transfer_coroutine_x
+	STA transfer_coroutine_a
+
+	; Deduce PPU::ADDR value from the values of transfer_coroutine_progress and X
+save_ppu_addr:
+	LDA transfer_coroutine_progress
+	BNE @not_opaque
+	; ppu_addr = opaque_buffer_ppu_addr + (X - last_opaque_pattern_index) * 16
+	@opaque:
+		TXA
+		SEC
+		SBC last_opaque_pattern_index
+		ASL
+		ASL
+		ASL
+		ASL
+		CLC
+		ADC opaque_buffer_ppu_addr + 0
+		STA transfer_coroutine_ppu_addr + 0
+
+		TXA
+		SEC
+		SBC last_opaque_pattern_index
+		LSR
+		LSR
+		LSR
+		LSR
+		ADC opaque_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+		JMP @done
+@not_opaque:
+	CMP #1
+	BNE @not_nametable
+	; ppu_addr = nametable_buffer_ppu_addr + X
+	@nametable:
+		TXA
+		CLC
+		ADC nametable_buffer_ppu_addr + 0
+		STA transfer_coroutine_ppu_addr + 0
+
+		LDA #$00
+		ADC nametable_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+		JMP @done
+@not_nametable:
+	; ppu_addr = opaque_buffer_ppu_addr + X * 16
+	@partial:
+		TXA
+		ASL
+		ASL
+		ASL
+		ASL
+		CLC
+		ADC partial_buffer_ppu_addr + 0
+		STA transfer_coroutine_ppu_addr + 0
+
+		TXA
+		LSR
+		LSR
+		LSR
+		LSR
+		ADC partial_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+@done:
+
+	; Save stack
+save_stack:
+	PLA
+	STA transfer_coroutine_ps
+	PLA
+	STA transfer_coroutine_pc + 0
+	PLA
+	STA transfer_coroutine_pc + 1
+
+	; This is dummy...
+	LDA #$00
+	STA VRC6::IRQ_CONTROL
+
+	RTS
 .ENDPROC
 
 

@@ -2,6 +2,8 @@
 .INCLUDE	"nmi.h"
 .INCLUDE	"nes.h"
 .INCLUDE	"irq.h"
+.INCLUDE	"render.h"
+.INCLUDE	"vrc6.h"
 
 
 
@@ -44,9 +46,24 @@ save_registers:
 	TYA
 	PHA
 
-check_frame_done_flag:
-	LDA frame_done_flag
-	BEQ no_gfx_update
+clear_vblank_flag:
+	BIT PPU::STATUS
+
+;check_frame_done_flag:
+;	LDA frame_done_flag
+;	BEQ no_gfx_update
+
+; hooby bleh
+	LDA #$FF - 14
+	STA VRC6::IRQ_LATCH
+	LDA #%00000010
+	STA VRC6::IRQ_CONTROL
+	LDA #<shutdown_transfer_coroutine
+	STA soft_irq_vector + 0
+	LDA #>shutdown_transfer_coroutine
+	STA soft_irq_vector + 1
+
+	JSR startup_transfer_coroutine
 
 write_registers:
 	LDA soft_ppuctrl
@@ -62,9 +79,9 @@ write_registers:
 	LDA #$00
 	STA oam_index
 
-clear_frame_done_flag:
-	LDA #$00
-	STA frame_done_flag
+;clear_frame_done_flag:
+;	LDA #$00
+;	STA frame_done_flag
 
 ; All timing sensitive updates have been performed, enable interrupts
 no_gfx_update:

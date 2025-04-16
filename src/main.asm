@@ -140,6 +140,8 @@ test_poly_buffer:	.res 32
 	LDA #$02
 	STA $FF
 
+	JSR init_transfer_coroutine
+
 forever:
 	LDX $FF
 	LDA buttons_held
@@ -222,29 +224,29 @@ forever:
 	STA $01
 
 	; Rasterize polygon with performance highlighting
-	LDA #PPU::MASK::R_EMPHASIS | PPU::MASK::GRAYSCALE
-	ORA soft_ppumask
-	STA PPU::MASK
 	JSR rasterize_poly
-	LDA soft_ppumask
-	STA PPU::MASK
-
-	; Transfer gfx buffers
-	LDA #$00
-	STA soft_ppumask
-	JSR wait_for_nmi
 
 	; Destination address for nametable
-	LDA #<$2000
-	STA nametable_buffer_ppu_addr + 0
-	LDA #>$2000
-	STA nametable_buffer_ppu_addr + 1
+	LDX #<$2000
+	LDY #>$2000
+	LDA $7FF
+	AND #%00000001
+	BEQ :+
+		LDX #<$2400
+		LDY #>$2400
+:	STX nametable_buffer_ppu_addr + 0
+	STY nametable_buffer_ppu_addr + 1
 
 	; Destination address for patterns
-	LDA #<$0000
-	STA partial_buffer_ppu_addr + 0
-	LDA #>$0000
-	STA partial_buffer_ppu_addr + 1
+	LDX #<$0000
+	LDY #>$0000
+	LDA $7FF
+	AND #%00000001
+	BEQ :+
+		LDX #<$1000
+		LDY #>$1000
+:	STX partial_buffer_ppu_addr + 0
+	STY partial_buffer_ppu_addr + 1
 
 	;
 	LDA next_partial_pattern_index
@@ -256,64 +258,19 @@ forever:
 	LDA #$01
 	STA graphics_buffers_full
 
-	JSR transfer_coroutine
-; TEMP CODE
-;
-;
-;
-;
-.if 0
-	; Transfer nametable buffer
-asd:
-	LDA #>$2000
-	STA PPU::ADDR
-	LDA #<$2000
-	STA PPU::ADDR
-
-	LDA #<(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
-	STA $00 + 0
-	LDA #>(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
-	STA $00 + 1
-	LDY #$100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES)
-	LDX #>(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES - 1) + 1
-@loop:
-	LDA ($00), Y
-	STA PPU::DATA
-	INY
-	BNE @loop
-	INC $00 + 1
-	DEX
-	BNE @loop
-
-	; Transfer pattern buffer
-ad2:
-	LDA #>$0000
-	STA PPU::ADDR
-	LDA #<$0000
-	STA PPU::ADDR
-	LDX #$00
-@loop:
-	.REPEAT	8, i
-		LDA .ident(.sprintf("pattern_buffer_%d", i)), X
-		STA PPU::DATA
-	.ENDREP
+:	LDA graphics_buffers_empty
+	BEQ :-
 	LDA #$00
-	.REPEAT	8, i
-		STA PPU::DATA
-	.ENDREP
-	INX
-	CPX next_partial_pattern_index
-	BNE @loop
-.ENDIF
-; END TEMP CODE
-;
-;
-;
-;
+	STA graphics_buffers_empty
 
-	LDA #PPU::MASK::RENDER_SP | PPU::MASK::RENDER_BG
-	STA soft_ppumask
-	JSR wait_for_nmi
+	LDX #PPU::CTRL::BG_PATTERN_L | PPU::CTRL::ENABLE_NMI | %00
+	LDA $7FF
+	AND #%00000001
+	BEQ :+
+		LDX #PPU::CTRL::BG_PATTERN_R | PPU::CTRL::ENABLE_NMI | %01
+:	STX soft_ppuctrl
+
+	INC $7FF
 
 	JSR read_controller
 	JMP forever
