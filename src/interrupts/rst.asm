@@ -1,6 +1,7 @@
 ; Reset handler
 .INCLUDE	"rst.h"
 .INCLUDE	"nes.h"
+.INCLUDE	"vrc6.h"
 ; Code to jump to after initialization. Should have a matching .EXPORT in another file
 .IMPORT		post_reset
 
@@ -18,6 +19,7 @@
 	STX PPU::MASK				; Disable rendering
 	STX $4010					; Disable DMC IRQs				
 
+	BIT PPU::STATUS
 vblank_wait_1:
 	BIT PPU::STATUS				; First wait for vblank
 	BPL vblank_wait_1
@@ -41,9 +43,7 @@ vblank_wait_2:
 	BIT PPU::STATUS				; Second wait for vblank, PPU is ready after this
 	BPL vblank_wait_2
 
-vblank_wait_3:
-	BIT PPU::STATUS				; This shouldn't be necessary, but the rom is messing up in mesen without it /shrug
-	BPL vblank_wait_3
+	JSR init_mapper
 
 	CLI							; Accept IRQs
 	JMP post_reset
