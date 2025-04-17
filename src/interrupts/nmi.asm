@@ -1,9 +1,5 @@
 ; NMI handler
 .INCLUDE	"nmi.h"
-.INCLUDE	"nes.h"
-.INCLUDE	"irq.h"
-.INCLUDE	"render.h"
-.INCLUDE	"vrc6.h"
 
 
 

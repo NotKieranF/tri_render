@@ -195,6 +195,9 @@ graphics_buffers_empty:			.RES 1	; ___
 nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
 partial_buffer_ppu_addr:		.RES 2	; Start location of current partial pattern buffer in PPU address space
 opaque_buffer_ppu_addr:			.RES 2
+frame_count:					.RES 1	; Incremented once per hardware frame
+scroll_temp:					.RES 1	; Intermediate value when computing loopy scroll
+nmi_serviced:					.RES 1	; $FF if NMI has been serviced this frame, $00 otherwise
 
 ; Coroutine state
 transfer_coroutine_pc:			.RES 2
@@ -2627,8 +2630,9 @@ bres_routine_table_hi:
 check_buffer_status:
 	LDA graphics_buffers_full
 	BNE :++
-		; Yield if not. Note that this can cause a race condition with NMI, so the B flag must be checked in the NMI handler
+		; Yield if not
 		BRK #$00
+		; BRK can be eaten by NMI; if carry is set here then we know we just returned from the NMI handler and our BRK wasn't serviced
 		BCC :+
 			BRK #$00
 	:	JMP check_buffer_status
@@ -2726,11 +2730,14 @@ transfer_partial_buffer:
 	JMP transfer_coroutine
 .ENDPROC
 
-;
-;
-;
-;
+; TODO: Wrap this into an init_render routine
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A
 .PROC	init_transfer_coroutine
+	; Interruptions here could cause race conditions
+	SEI
+
 	LDA #<transfer_coroutine
 	STA transfer_coroutine_pc + 0
 	LDA #>transfer_coroutine
@@ -2745,52 +2752,21 @@ transfer_partial_buffer:
 	LDA #>irq_dummy
 	STA soft_irq_vector + 1
 
+	LDA #$00
+	STA nmi_serviced
+
+	CLI
 	RTS
 .ENDPROC
 
-;
-;	Takes:
-;	Returns:
-;	Clobbers:
-.PROC	startup_transfer_coroutine
-	; Restore stack
-restore_stack:
-	LDA transfer_coroutine_pc + 1
-	PHA
-	LDA transfer_coroutine_pc + 0
-	PHA
-	LDA transfer_coroutine_ps
-	PHA
-
-	; Restore PPU address value
-restore_ppu_addr:
-	LDA transfer_coroutine_ppu_addr + 1
-	STA PPU::ADDR
-	LDA transfer_coroutine_ppu_addr + 0
-	STA PPU::ADDR
-
-	; Restore PPU control value
-restore_ppu_ctrl:
-	LDA transfer_coroutine_ppu_ctrl
-	STA PPU::CTRL
-
-	; Restore registers
-restore_registers:
-	LDA transfer_coroutine_a
-	LDX transfer_coroutine_x
-	LDY transfer_coroutine_y
-
-	; Indicate ___
-	CLC
-
-	RTI
-.ENDPROC
-
-;
-;
-;
-;
+; Cut-down NMI handler for use with extended vblank
+; Queues coroutine-shutdown interrupt and extended vblank end interrupt, increments frame counter
 .PROC	nmi_render
+	; Check whether NMI has been serviced this frame already
+check_nmi_serviced:
+	BIT nmi_serviced
+	BMI exit
+
 save_registers:
 	PHA
 	TXA
@@ -2798,13 +2774,23 @@ save_registers:
 	TYA
 	PHA
 
-	;
+	; Queue coroutine-shutdown interrupt and extended vblank end interrupt
+	; We mustn't actually set the IRQ vector here, as it's not guaranteed that the extended vblank interrupt has occurred--for example, the first frame.
+	; In that case, the vector should point to the dummy irq handler
+queue_interrupts:
 	LDA #$FF - 21
 	STA VRC6::IRQ_LATCH
 	LDA #%00000011
 	STA VRC6::IRQ_CONTROL
 	LDA #$FF - EXTRA_VBLANK_TOP
 	STA VRC6::IRQ_LATCH
+
+increment_frame_count:
+	INC frame_count
+
+set_nmi_serviced:
+	LDA #$FF
+	STA nmi_serviced
 
 restore_registers:
 	PLA
@@ -2813,16 +2799,12 @@ restore_registers:
 	TAX
 	PLA
 
-	; Indicate that NMI is returning
-	SEC
-
+exit:
+	SEC			; Indicate that NMI is returning. This is necessary to work around the BRK bug
 	RTI
 .ENDPROC
 
-;
-;
-;
-;
+; Begin extended vblank, ***
 .PROC	irq_begin_extended_vblank
 save_registers:
 	PHA
@@ -2831,27 +2813,62 @@ save_registers:
 	TYA
 	PHA
 
+	; Set vector for shutdown IRQ. Later, NMI will queue the interrupt
+set_irq_vector:
 	LDA #<irq_shutdown_coroutine
 	STA soft_irq_vector + 0
 	LDA #>irq_shutdown_coroutine
 	STA soft_irq_vector + 1
 
+	; Furthermore, we should halt any interrupts until NMI enables them later
+disable_interrupts:
 	LDA #$00
-	STA PPU::MASK
 	STA VRC6::IRQ_CONTROL
 
-clear_vblank_flag:
-	BIT PPU::STATUS
+	; Wait until hblank
+delay:
 
-	JMP startup_transfer_coroutine
+	; Disable rendering during safe zone. This code can float around, depending on which spot minimizes the necessary delay code
+disable_rendering:
+	LDA #$00
+	STA PPU::MASK
+
+	; Restore state associated with coroutine
+restore_return_state:
+	LDA transfer_coroutine_pc + 1
+	PHA
+	LDA transfer_coroutine_pc + 0
+	PHA
+	LDA transfer_coroutine_ps
+	PHA
+
+restore_ppu_addr:
+	LDA transfer_coroutine_ppu_addr + 1
+	STA PPU::ADDR
+	LDA transfer_coroutine_ppu_addr + 0
+	STA PPU::ADDR
+
+restore_ppu_ctrl:
+	LDA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+
+restore_registers:
+	LDA transfer_coroutine_a
+	LDX transfer_coroutine_x
+	LDY transfer_coroutine_y
+
+	; Indicate that we're returning to the coroutine via the "proper" way, i.e. not from NMI
+execute_coroutine:
+	CLC
+	RTI
 .ENDPROC
 
-;
-;
-;
-;
+; ****
 .PROC	irq_shutdown_coroutine
-	; Save registers
+	; We can be freely interrupted here, as we do not want to delay the end extended vblank routine
+	CLI
+
+	; Save coroutine registers
 save_registers:
 	STY transfer_coroutine_y
 	STX transfer_coroutine_x
@@ -2923,8 +2940,8 @@ save_ppu_addr:
 		STA transfer_coroutine_ppu_addr + 1
 @done:
 
-	; Save stack
-save_stack:
+	; Save coroutine return state
+save_return_state:
 	PLA
 	STA transfer_coroutine_ps
 	PLA
@@ -2932,23 +2949,25 @@ save_stack:
 	PLA
 	STA transfer_coroutine_pc + 1
 
-	LDA #<irq_dummy
-	STA soft_irq_vector + 0
-	LDA #>irq_dummy
-	STA soft_irq_vector + 1
+	; Sets up a dummy interrupt if this routine was triggered manually, otherwise sets up extended vblank end interrupt and queues extended vblank start interrupt
+set_irq_vector:
+	LDX #<irq_dummy
+	LDY #>irq_dummy
 
+	; Check B flag
 	LDA transfer_coroutine_ps
 	AND #%00010000
 	BNE :+
-		LDA #<irq_end_extended_vblank
-		STA soft_irq_vector + 0
-		LDA #>irq_end_extended_vblank
-		STA soft_irq_vector + 1
-
+		LDX #<irq_end_extended_vblank
+		LDY #>irq_end_extended_vblank
 		LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
 		STA VRC6::IRQ_LATCH
-:
+:	STX soft_irq_vector + 0
+	STY soft_irq_vector + 1
 
+
+	; Restores registers saved by extended vblank begin interrupt
+restore_registers:
 	PLA
 	TAY
 	PLA
@@ -2958,36 +2977,46 @@ save_stack:
 	RTI
 .ENDPROC
 
-;
-;
-;
-;
+; Dummied out alternative of irq_shutdown_coroutine
+; Sets up extended vblank end interrupt, queues extended vblank start interrupt
 .PROC	irq_dummy
+save_registers:
 	PHA
 
+set_irq_vector:
 	LDA #<irq_end_extended_vblank
 	STA soft_irq_vector + 0
 	LDA #>irq_end_extended_vblank
 	STA soft_irq_vector + 1
 
+queue_interrupt:
 	LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
 	STA VRC6::IRQ_LATCH
 
+restore_registers:
 	PLA
 
 	RTI
 .ENDPROC
 
-;
-;
-;
-;
+; Ends extended vblank, sets up IRQ vector for beginning of extended vblank
 .PROC	irq_end_extended_vblank
+save_registers:
 	PHA
 	TXA
 	PHA
+	TYA
+	PHA
 
-	;
+	; Setup the IRQ vector for the final interrupt this frame. No need to queue an additional latch value
+set_irq_vector:
+	LDA #<irq_begin_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_begin_extended_vblank
+	STA soft_irq_vector + 1
+
+	; Update PPU registers based on soft counterparts
+update_registers:
 	LDA soft_ppuctrl
 	STA PPU::CTRL
 	LDA #>oam
@@ -2995,43 +3024,51 @@ save_stack:
 	LDA #$00
 	STA oam_index
 
-	; Split scroll
+	; Use loopy technique to set scroll for the next frame
+compute_scroll:
+	; PPU::ADDR = nametable_id << 2
 	LDA soft_ppuctrl
 	AND #%00000011
 	ASL
 	ASL
 	STA PPU::ADDR
-
+	; PPU::SCROLL = scroll_y
 	LDA soft_scroll_y
 	STA PPU::SCROLL
-
+	; PPU::SCROLL = scroll_x
+	; This is delayed until hblank
 	LDX soft_scroll_x
-
+	; PPU::ADDR = ((scroll_y & $F8) << 2) | (scroll_x >> 3)
+	; This is delayed until hblank
 	LDA soft_scroll_y
 	AND #%11111000
 	ASL
 	ASL
-	STA $7FFF
+	STA scroll_temp
 	LDA soft_scroll_x
 	LSR
 	LSR
 	LSR
-	ORA $7FFF
+	ORA scroll_temp
 
+	; Delay until the following code executes within hblank
+delay:
+
+	; Commit final scroll state, enable rendering
+enable_rendering:
+	LDY soft_ppumask
 	STX PPU::SCROLL
 	STA PPU::ADDR
+	STY PPU::MASK
 
+	; Indicate that NMI has not yet occurred this frame
+clear_nmi_serviced:
+	LDA #$00
+	STA nmi_serviced
 
-	; Enable rendering late
-	LDA soft_ppumask
-	STA PPU::MASK
-
-	;
-	LDA #<irq_begin_extended_vblank
-	STA soft_irq_vector + 0
-	LDA #>irq_begin_extended_vblank
-	STA soft_irq_vector + 1
-
+restore_registers:
+	PLA
+	TAY
 	PLA
 	TAX
 	PLA

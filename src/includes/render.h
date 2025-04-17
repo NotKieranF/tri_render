@@ -70,7 +70,7 @@ NEAR_PLANE					= $0100
 ; Routines
 .GLOBAL		plot_point
 .GLOBAL		render_frame
-.GLOBAL		transfer_coroutine, startup_transfer_coroutine, shutdown_transfer_coroutine, init_transfer_coroutine, nmi_render
+.GLOBAL		init_transfer_coroutine, nmi_render
 
 ; For testing
 .GLOBAL		draw_line, rasterize_poly, opaque_tile_indices, nametable_buffer
