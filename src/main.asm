@@ -22,6 +22,12 @@ pal_buffer:				.RES 32
 
 .CODE
 .PROC main
+	; TEMP
+	LDA #<nmi_render
+	STA soft_nmi_vector + 0
+	LDA #>nmi_render
+	STA soft_nmi_vector + 1
+
 
 init_pal:
 	LDA #$3F

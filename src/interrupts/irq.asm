@@ -1,7 +1,5 @@
 ; IRQ handler
 .INCLUDE	"irq.h"
-.INCLUDE	"nes.h"
-.INCLUDE	"nmi.h"
 .INCLUDE	"vrc6.h"
 
 

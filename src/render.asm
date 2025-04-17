@@ -2,6 +2,7 @@
 ; TODO: Credits (poly render nesdev thread, c-hacking math, elite website), Proper License
 .INCLUDE	"nes.h"
 .INCLUDE	"render.h"
+.INCLUDE	"irq.h"
 .INCLUDE	"nmi.h"
 .INCLUDE	"math.h"
 .INCLUDE	"objects.h"
@@ -174,7 +175,9 @@
 ;		* Kicked off by NMI
 ;		* Needs to take a constant time
 
-RASTERIZE_ROWS	= 1	; Number of tile rows to be rasterized at a time
+RASTERIZE_ROWS		= 1	; Number of tile rows to be rasterized at a time
+EXTRA_VBLANK_TOP	= 16
+EXTRA_VBLANK_BOTTOM	= 16
 
 .ZEROPAGE
 display_list_indices:			.RES 32
@@ -2623,10 +2626,12 @@ bres_routine_table_hi:
 	; Check whether graphics buffers are ready to be emptied
 check_buffer_status:
 	LDA graphics_buffers_full
-	BNE :+
+	BNE :++
 		; Yield if not. Note that this can cause a race condition with NMI, so the B flag must be checked in the NMI handler
 		BRK #$00
-		JMP check_buffer_status
+		BCC :+
+			BRK #$00
+	:	JMP check_buffer_status
 :	LDA #$00
 	STA graphics_buffers_full
 	; Initialize a counter that is incremented each time we progress to emptying a new buffer
@@ -2731,6 +2736,15 @@ transfer_partial_buffer:
 	LDA #>transfer_coroutine
 	STA transfer_coroutine_pc + 1
 
+	LDA #PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+
+	;
+	LDA #<irq_dummy
+	STA soft_irq_vector + 0
+	LDA #>irq_dummy
+	STA soft_irq_vector + 1
+
 	RTS
 .ENDPROC
 
@@ -2766,14 +2780,77 @@ restore_registers:
 	LDX transfer_coroutine_x
 	LDY transfer_coroutine_y
 
+	; Indicate ___
+	CLC
+
 	RTI
 .ENDPROC
 
 ;
-;	Takes:
-;	Returns:
-;	Clobbers:
-.PROC	shutdown_transfer_coroutine
+;
+;
+;
+.PROC	nmi_render
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	;
+	LDA #$FF - 21
+	STA VRC6::IRQ_LATCH
+	LDA #%00000011
+	STA VRC6::IRQ_CONTROL
+	LDA #$FF - EXTRA_VBLANK_TOP
+	STA VRC6::IRQ_LATCH
+
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	; Indicate that NMI is returning
+	SEC
+
+	RTI
+.ENDPROC
+
+;
+;
+;
+;
+.PROC	irq_begin_extended_vblank
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	LDA #<irq_shutdown_coroutine
+	STA soft_irq_vector + 0
+	LDA #>irq_shutdown_coroutine
+	STA soft_irq_vector + 1
+
+	LDA #$00
+	STA PPU::MASK
+	STA VRC6::IRQ_CONTROL
+
+clear_vblank_flag:
+	BIT PPU::STATUS
+
+	JMP startup_transfer_coroutine
+.ENDPROC
+
+;
+;
+;
+;
+.PROC	irq_shutdown_coroutine
 	; Save registers
 save_registers:
 	STY transfer_coroutine_y
@@ -2795,6 +2872,7 @@ save_ppu_addr:
 		ASL
 		CLC
 		ADC opaque_buffer_ppu_addr + 0
+		PHP
 		STA transfer_coroutine_ppu_addr + 0
 
 		TXA
@@ -2804,6 +2882,7 @@ save_ppu_addr:
 		LSR
 		LSR
 		LSR
+		PLP
 		ADC opaque_buffer_ppu_addr + 1
 		STA transfer_coroutine_ppu_addr + 1
 		JMP @done
@@ -2831,6 +2910,7 @@ save_ppu_addr:
 		ASL
 		CLC
 		ADC partial_buffer_ppu_addr + 0
+		PHP
 		STA transfer_coroutine_ppu_addr + 0
 
 		TXA
@@ -2838,6 +2918,7 @@ save_ppu_addr:
 		LSR
 		LSR
 		LSR
+		PLP
 		ADC partial_buffer_ppu_addr + 1
 		STA transfer_coroutine_ppu_addr + 1
 @done:
@@ -2851,11 +2932,111 @@ save_stack:
 	PLA
 	STA transfer_coroutine_pc + 1
 
-	; This is dummy...
-	LDA #$00
-	STA VRC6::IRQ_CONTROL
+	LDA #<irq_dummy
+	STA soft_irq_vector + 0
+	LDA #>irq_dummy
+	STA soft_irq_vector + 1
 
-	RTS
+	LDA transfer_coroutine_ps
+	AND #%00010000
+	BNE :+
+		LDA #<irq_end_extended_vblank
+		STA soft_irq_vector + 0
+		LDA #>irq_end_extended_vblank
+		STA soft_irq_vector + 1
+
+		LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
+		STA VRC6::IRQ_LATCH
+:
+
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	RTI
+.ENDPROC
+
+;
+;
+;
+;
+.PROC	irq_dummy
+	PHA
+
+	LDA #<irq_end_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_end_extended_vblank
+	STA soft_irq_vector + 1
+
+	LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
+	STA VRC6::IRQ_LATCH
+
+	PLA
+
+	RTI
+.ENDPROC
+
+;
+;
+;
+;
+.PROC	irq_end_extended_vblank
+	PHA
+	TXA
+	PHA
+
+	;
+	LDA soft_ppuctrl
+	STA PPU::CTRL
+	LDA #>oam
+	STA PPU::OAMDMA
+	LDA #$00
+	STA oam_index
+
+	; Split scroll
+	LDA soft_ppuctrl
+	AND #%00000011
+	ASL
+	ASL
+	STA PPU::ADDR
+
+	LDA soft_scroll_y
+	STA PPU::SCROLL
+
+	LDX soft_scroll_x
+
+	LDA soft_scroll_y
+	AND #%11111000
+	ASL
+	ASL
+	STA $7FFF
+	LDA soft_scroll_x
+	LSR
+	LSR
+	LSR
+	ORA $7FFF
+
+	STX PPU::SCROLL
+	STA PPU::ADDR
+
+
+	; Enable rendering late
+	LDA soft_ppumask
+	STA PPU::MASK
+
+	;
+	LDA #<irq_begin_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_begin_extended_vblank
+	STA soft_irq_vector + 1
+
+	PLA
+	TAX
+	PLA
+
+	RTI
 .ENDPROC
 
 
