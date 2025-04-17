@@ -148,6 +148,11 @@ test_poly_buffer:	.res 32
 
 	JSR init_transfer_coroutine
 
+	LDA #$00
+.REPEAT 8, i
+	STA .ident(.sprintf("pattern_buffer_%d", i))
+.ENDREP
+
 forever:
 	LDX $FF
 	LDA buttons_held
@@ -202,7 +207,7 @@ forever:
 	STA next_partial_pattern_index
 
 	; Clear opaque tile allocations
-	LDA #RENDER_MAX_TILES - 1
+	LDA #$FF
 	STA next_opaque_pattern_index
 
 	LDA #$00
@@ -232,6 +237,13 @@ forever:
 	; Rasterize polygon with performance highlighting
 	JSR rasterize_poly
 
+
+	;
+	LDA next_partial_pattern_index
+	STA last_partial_pattern_index
+	LDA #$FF
+	STA last_opaque_pattern_index
+
 	; Destination address for nametable
 	LDX #<$2000
 	LDY #>$2000
@@ -254,11 +266,25 @@ forever:
 :	STX partial_buffer_ppu_addr + 0
 	STY partial_buffer_ppu_addr + 1
 
-	;
-	LDA next_partial_pattern_index
-	STA last_partial_pattern_index
-	LDA #$FF
-	STA last_opaque_pattern_index
+	; Destination address for opaque tiles
+	LDA last_opaque_pattern_index
+	ASL
+	ASL
+	ASL
+	ASL
+	CLC
+	ADC partial_buffer_ppu_addr + 0
+	PHP
+	STA opaque_buffer_ppu_addr + 0
+
+	LDA last_opaque_pattern_index
+	LSR
+	LSR
+	LSR
+	LSR
+	PLP
+	ADC partial_buffer_ppu_addr + 1
+	STA opaque_buffer_ppu_addr + 1
 
 	;
 	LDA #$01

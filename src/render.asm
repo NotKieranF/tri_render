@@ -2393,8 +2393,14 @@ exit:
 		BNE :+
 			; Otherwise we must allocate a new one, and write that
 			LDA next_opaque_pattern_index
-			DEC next_opaque_pattern_index
+;			DEC next_opaque_pattern_index
 			STA opaque_tile_indices, X
+			; TODO: Optimize this
+			TAX
+			LDA poly_color
+			STA opaque_tile_buffer, X
+			LDA next_opaque_pattern_index
+			DEC next_opaque_pattern_index
 	:	STA (nametable_ptr), Y
 		RTS
 
@@ -2629,13 +2635,10 @@ bres_routine_table_hi:
 	; Check whether graphics buffers are ready to be emptied
 check_buffer_status:
 	LDA graphics_buffers_full
-	BNE :++
+	BNE :+
 		; Yield if not
 		BRK #$00
-		; BRK can be eaten by NMI; if carry is set here then we know we just returned from the NMI handler and our BRK wasn't serviced
-		BCC :+
-			BRK #$00
-	:	JMP check_buffer_status
+		JMP check_buffer_status
 :	LDA #$00
 	STA graphics_buffers_full
 	; Initialize a counter that is incremented each time we progress to emptying a new buffer
@@ -2674,6 +2677,7 @@ transfer_nametable_buffer:
 	STA PPU::CTRL
 	LDX #$00
 @loop:
+	; This could maybe be improved... STY PPU::ADDR : STX PPU::ADDR?
 	LDA nametable_buffer_ppu_addr + 1
 	STA PPU::ADDR
 	TXA
@@ -2722,6 +2726,7 @@ transfer_partial_buffer:
 	CPX last_partial_pattern_index
 	BCC @loop
 
+exit:
 	; Indicate that graphics buffers are emptied
 	LDA #$01
 	STA graphics_buffers_empty
@@ -2792,6 +2797,13 @@ set_nmi_serviced:
 	LDA #$FF
 	STA nmi_serviced
 
+	; Set the carry flag if NMI ate a BRK instruction
+check_b_flag:
+	TSX
+	LDA $0100 + 4, X
+	AND #%00010000
+	ADC #%11111110
+
 restore_registers:
 	PLA
 	TAY
@@ -2799,13 +2811,20 @@ restore_registers:
 	TAX
 	PLA
 
+	; Execute IRQ handler if we detected NMI ate a BRK instruction
+do_irq:
+	BCC exit
+		JMP (soft_irq_vector)
+
 exit:
-	SEC			; Indicate that NMI is returning. This is necessary to work around the BRK bug
 	RTI
 .ENDPROC
 
 ; Begin extended vblank, ***
 .PROC	irq_begin_extended_vblank
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
 save_registers:
 	PHA
 	TXA
@@ -2857,17 +2876,12 @@ restore_registers:
 	LDX transfer_coroutine_x
 	LDY transfer_coroutine_y
 
-	; Indicate that we're returning to the coroutine via the "proper" way, i.e. not from NMI
 execute_coroutine:
-	CLC
 	RTI
 .ENDPROC
 
 ; ****
 .PROC	irq_shutdown_coroutine
-	; We can be freely interrupted here, as we do not want to delay the end extended vblank routine
-	CLI
-
 	; Save coroutine registers
 save_registers:
 	STY transfer_coroutine_y
@@ -2960,6 +2974,8 @@ set_irq_vector:
 	BNE :+
 		LDX #<irq_end_extended_vblank
 		LDY #>irq_end_extended_vblank
+		; Only acknowledge IRQ if we didn't come from BRK
+		STA VRC6::IRQ_ACKNOWLEDGE
 		LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
 		STA VRC6::IRQ_LATCH
 :	STX soft_irq_vector + 0
@@ -2980,6 +2996,9 @@ restore_registers:
 ; Dummied out alternative of irq_shutdown_coroutine
 ; Sets up extended vblank end interrupt, queues extended vblank start interrupt
 .PROC	irq_dummy
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
 save_registers:
 	PHA
 
@@ -3001,6 +3020,9 @@ restore_registers:
 
 ; Ends extended vblank, sets up IRQ vector for beginning of extended vblank
 .PROC	irq_end_extended_vblank
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
 save_registers:
 	PHA
 	TXA
@@ -3115,15 +3137,15 @@ screen_hi:
 ; TODO: Give credit/ask permission
 .REPEAT	8, i
 	.ident(.sprintf("color_table_%d", i)):
-	.LOBYTES	%0000000000000000 >> i
-	.LOBYTES	%0001000000010000 >> i
-	.LOBYTES	%0011000000110000 >> i
-	.LOBYTES	%0111000001110000 >> i
-	.LOBYTES	%1111000011110000 >> i
-	.LOBYTES	%1111000111110001 >> i
-	.LOBYTES	%1111001111110011 >> i
-	.LOBYTES	%1111011111110111 >> i
-	.LOBYTES	%1111111111111111 >> i
+	.LOBYTES	%00000000000000000000000000000000 >> (i * 3)
+	.LOBYTES	%00010000000100000001000000010000 >> (i * 3)
+	.LOBYTES	%00110000001100000011000000110000 >> (i * 3)
+	.LOBYTES	%01110000011100000111000001110000 >> (i * 3)
+	.LOBYTES	%11110000111100001111000011110000 >> (i * 3)
+	.LOBYTES	%11110001111100011111000111110001 >> (i * 3)
+	.LOBYTES	%11110011111100111111001111110011 >> (i * 3)
+	.LOBYTES	%11110111111101111111011111110111 >> (i * 3)
+	.LOBYTES	%11111111111111111111111111111111 >> (i * 3)
 .ENDREP
 
 ; Cube model
