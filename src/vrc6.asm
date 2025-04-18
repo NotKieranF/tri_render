@@ -1,0 +1,45 @@
+.INCLUDE	"vrc6.h"
+
+
+
+
+
+.SEGMENT	"CODE_FIXED"
+;
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A
+.PROC	init_mapper
+	; Disable and acknowledge any pending IRQs
+	LDA #$00
+	STA VRC6::IRQ_CONTROL
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+	; Setup initial PRG banks
+	LDA #$00
+	STA VRC6::PRG_BANK_8000
+	LDA #$02
+	STA VRC6::PRG_BANK_C000
+
+	; Setup initial CHR banks
+	LDA #%10001100
+	STA VRC6::CHR_MODE
+	LDA #$00
+	STA VRC6::CHR_BANK_0
+	LDA #$01
+	STA VRC6::CHR_BANK_1
+	LDA #$02
+	STA VRC6::CHR_BANK_2
+	LDA #$03
+	STA VRC6::CHR_BANK_3
+	LDA #$04
+	STA VRC6::CHR_BANK_4
+	LDA #$05
+	STA VRC6::CHR_BANK_5
+	LDA #$06
+	STA VRC6::CHR_BANK_6
+	LDA #$07
+	STA VRC6::CHR_BANK_7
+
+	RTS
+.ENDPROC

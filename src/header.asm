@@ -2,7 +2,7 @@
 
 h_PRG_ROM_SIZE		= 2			; PRG-ROM size in 16k banks
 h_CHR_ROM_SIZE		= 0			; CHR-ROM size in 8k banks
-h_MAPPER			= 0			; Mapper number
+h_MAPPER			= 24		; Mapper number
 h_MIRRORING			= 0			; Mirroring (Vertical = 1)
 h_FOUR_SCREEN		= 0			; Four screen vram
 h_BATTERY			= 0			; Non-volatile memory present?

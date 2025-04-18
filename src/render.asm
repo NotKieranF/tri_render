@@ -2,9 +2,11 @@
 ; TODO: Credits (poly render nesdev thread, c-hacking math, elite website), Proper License
 .INCLUDE	"nes.h"
 .INCLUDE	"render.h"
+.INCLUDE	"irq.h"
 .INCLUDE	"nmi.h"
 .INCLUDE	"math.h"
 .INCLUDE	"objects.h"
+.INCLUDE	"vrc6.h"
 
 ; Overview of rendering pipeline:
 ;	* 
@@ -173,7 +175,9 @@
 ;		* Kicked off by NMI
 ;		* Needs to take a constant time
 
-RASTERIZE_ROWS	= 1	; Number of tile rows to be rasterized at a time
+RASTERIZE_ROWS		= 1	; Number of tile rows to be rasterized at a time
+EXTRA_VBLANK_TOP	= 16
+EXTRA_VBLANK_BOTTOM	= 16
 
 .ZEROPAGE
 display_list_indices:			.RES 32
@@ -182,8 +186,29 @@ left_edges:						.RES 8 * RASTERIZE_ROWS	; Buffer containing the leftmost pixels
 right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixels of a tile row to be rasterized
 tile_buffer_alpha:				.RES 8
 temp_mask:						.RES 1	; TODO: fold this into other temp variables
-next_partial_pattern_index:		.RES 1	; Grows upwards from $01
-next_opaque_pattern_index:		.RES 1	; Grows downwards from $FF
+partial_pattern_write_head:		.RES 1	; Grows upwards from $01
+opaque_pattern_write_head:		.RES 1	; Grows downwards from $FF
+last_partial_pattern_index:		.RES 1	; Final index in a frame
+last_opaque_pattern_index:		.RES 1	; Final index in a frame
+graphics_buffers_full:			.RES 1	; Indicates that the render thread is no longer accessing graphics buffers
+graphics_buffers_empty:			.RES 1	; Indicates that the transfer thread is no longer accessing graphics buffers
+nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
+partial_buffer_ppu_addr:		.RES 2	; Start location of current partial pattern buffer in PPU address space
+opaque_buffer_ppu_addr:			.RES 2
+frame_count:					.RES 1	; Incremented once per hardware frame
+scroll_temp:					.RES 1	; Intermediate value when computing loopy scroll
+nmi_serviced:					.RES 1	; $FF if NMI has been serviced this frame, $00 otherwise
+partial_pattern_read_head:		.RES 1	;
+
+; Coroutine state
+transfer_coroutine_pc:			.RES 2
+transfer_coroutine_ps:			.RES 1
+transfer_coroutine_ppu_addr:	.RES 2
+transfer_coroutine_ppu_ctrl:	.RES 1
+transfer_coroutine_a:			.RES 1
+transfer_coroutine_x:			.RES 1
+transfer_coroutine_y:			.RES 1
+transfer_coroutine_progress:	.RES 1
 
 ; Camera parameters
 camera_pos_sub:
@@ -241,7 +266,11 @@ poly_buffer_last:				.RES 1
 
 .SEGMENT	"SAVERAM"
 ; Converts color IDs into pattern table indices
+; TODO: This doesn't handle large numbers of unique shades gracefully. Probably a good idea to turn it into a hash-map
 opaque_tile_indices:			.RES NUM_SHADES
+; Converts pattern table indices into color IDs
+; TODO: This is probably excessive in terms of RAM usage
+opaque_tile_buffer:				.RES 256
 
 .ALIGN	256
 ; Pattern table buffers
@@ -2211,7 +2240,7 @@ exit:
 
 		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
 		LDA (nametable_ptr), Y
-		CMP ::next_opaque_pattern_index
+		CMP ::opaque_pattern_write_head
 		BCS @loop_check
 
 		; Rasterize the current tile to a temporary alpha buffer
@@ -2243,7 +2272,7 @@ exit:
 
 		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
 		LDA (nametable_ptr), Y
-		CMP ::next_opaque_pattern_index
+		CMP ::opaque_pattern_write_head
 		BCS @loop_check
 
 		; Rasterize the current tile to a temporary alpha buffer
@@ -2310,8 +2339,8 @@ exit:
 			JMP @update_existing_tile
 	:	; If existing tile is blank, we must allocate a new one
 	@allocate_new_tile:
-		LAX next_partial_pattern_index
-		INC next_partial_pattern_index
+		LAX partial_pattern_write_head
+		INC partial_pattern_write_head
 		STA (nametable_ptr), Y
 
 		LDY poly_color
@@ -2364,9 +2393,15 @@ exit:
 		; If the current color already has an entry in opaque_tile_indices, we can write that to the nametable buffer
 		BNE :+
 			; Otherwise we must allocate a new one, and write that
-			LDA next_opaque_pattern_index
-			DEC next_opaque_pattern_index
+			LDA opaque_pattern_write_head
+;			DEC opaque_pattern_write_head
 			STA opaque_tile_indices, X
+			; TODO: Optimize this
+			TAX
+			LDA poly_color
+			STA opaque_tile_buffer, X
+			LDA opaque_pattern_write_head
+			DEC opaque_pattern_write_head
 	:	STA (nametable_ptr), Y
 		RTS
 
@@ -2593,6 +2628,478 @@ bres_routine_table_hi:
 	RTS
 .ENDPROC
 
+;
+;	Takes:
+;	Returns:
+;	Clobbers:
+.PROC	transfer_coroutine
+	; Check whether graphics buffers are ready to be emptied
+check_buffer_status:
+	LDA graphics_buffers_full
+	BNE :+
+		; Yield if not
+		BRK #$00
+		JMP check_buffer_status
+:	LDA #$00
+	STA graphics_buffers_full
+	; Initialize a counter that is incremented each time we progress to emptying a new buffer
+	; This is used when shutting down the coroutine to deduce the current value of PPU::ADDR
+	STA transfer_coroutine_progress
+
+	; Transfer opaque tiles
+transfer_opaque_buffer:
+	LDA opaque_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	LDA opaque_buffer_ppu_addr + 0
+	STA PPU::ADDR
+	LDX last_opaque_pattern_index
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+	LDY opaque_tile_buffer, X
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("color_table_%d", i)), Y
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	BNE @loop
+	INC transfer_coroutine_progress
+
+	; Transfer nametable_buffer
+transfer_nametable_buffer:
+	LDA #PPU::CTRL::INC_32 | PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+	; Y contains the hi byte of the base address of the column throughout the loop
+	LDY nametable_buffer_ppu_addr + 1
+	LDX #$00
+@loop:
+	; Update base address for new column
+	STY PPU::ADDR
+	STX PPU::ADDR
+
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+.REPEAT	::SCREEN_HEIGHT_TILES, i
+	LDA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+	STA PPU::DATA
+.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BCS :+
+		JMP @loop
+:	; Restore increment value
+	LDA #PPU::CTRL::INC_1 | PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+	INC transfer_coroutine_progress
+
+	; Transfer partial tiles
+transfer_partial_buffer:
+	LDA partial_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	LDA partial_buffer_ppu_addr + 0
+	STA PPU::ADDR
+	LDX #$00
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+	STX partial_pattern_read_head	; Inform the main thread where we are, so rasterization can be done concurrently
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	CPX last_partial_pattern_index
+	BCC @loop
+
+exit:
+	; Indicate that graphics buffers are emptied
+	LDA #$01
+	STA graphics_buffers_empty
+
+	; Endlessly loop
+	JMP transfer_coroutine
+.ENDPROC
+
+; TODO: Wrap this into an init_render routine
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A
+.PROC	init_transfer_coroutine
+	; Interruptions here could cause race conditions
+	SEI
+
+	LDA #<transfer_coroutine
+	STA transfer_coroutine_pc + 0
+	LDA #>transfer_coroutine
+	STA transfer_coroutine_pc + 1
+
+	LDA #PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+
+	;
+	LDA #<irq_dummy
+	STA soft_irq_vector + 0
+	LDA #>irq_dummy
+	STA soft_irq_vector + 1
+
+	LDA #$00
+	STA nmi_serviced
+
+	CLI
+	RTS
+.ENDPROC
+
+; Cut-down NMI handler for use with extended vblank
+; Queues coroutine-shutdown interrupt and extended vblank end interrupt, increments frame counter
+.PROC	nmi_render
+	; Check whether NMI has been serviced this frame already
+check_nmi_serviced:
+	BIT nmi_serviced
+	BMI exit
+
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	; Queue coroutine-shutdown interrupt and extended vblank end interrupt
+	; We mustn't actually set the IRQ vector here, as it's not guaranteed that the extended vblank interrupt has occurred--for example, the first frame.
+	; In that case, the vector should point to the dummy irq handler
+queue_interrupts:
+	LDA #VRC6_SCANLINE 21 + EXTRA_VBLANK_TOP - 4 - 4
+	STA VRC6::IRQ_LATCH
+	LDA #%00000011
+	STA VRC6::IRQ_CONTROL
+	LDA #VRC6_SCANLINE 4
+	STA VRC6::IRQ_LATCH
+
+increment_frame_count:
+	INC frame_count
+
+set_nmi_serviced:
+	LDA #$FF
+	STA nmi_serviced
+
+	; Set the carry flag if NMI ate a BRK instruction
+check_b_flag:
+	TSX
+	LDA $0100 + 4, X
+	AND #%00010000
+	ADC #%11111110
+
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	; Execute IRQ handler if we detected NMI ate a BRK instruction
+do_irq:
+	BCC exit
+		JMP (soft_irq_vector)
+
+exit:
+	RTI
+.ENDPROC
+
+; Begin extended vblank, kick off execution of transfer coroutine
+.PROC	irq_begin_extended_vblank
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	; Set vector for shutdown IRQ. Later, NMI will queue the interrupt
+set_irq_vector:
+	LDA #<irq_shutdown_coroutine
+	STA soft_irq_vector + 0
+	LDA #>irq_shutdown_coroutine
+	STA soft_irq_vector + 1
+
+	; Furthermore, we should halt any interrupts until NMI enables them later
+disable_interrupts:
+	LDA #$00
+	STA VRC6::IRQ_CONTROL
+
+	; Wait until safe zone
+delay:
+	LDX #10
+:	DEX
+	BNE :-
+
+	; Disable rendering during safe zone. This code can float around, depending on which spot minimizes the necessary delay code
+disable_rendering:
+	LDA #$00 | PPU::MASK::GRAYSCALE
+	STA PPU::MASK
+
+	; Restore state associated with coroutine
+restore_return_state:
+	LDA transfer_coroutine_pc + 1
+	PHA
+	LDA transfer_coroutine_pc + 0
+	PHA
+	LDA transfer_coroutine_ps
+	PHA
+
+restore_ppu_addr:
+	LDA transfer_coroutine_ppu_addr + 1
+	STA PPU::ADDR
+	LDA transfer_coroutine_ppu_addr + 0
+	STA PPU::ADDR
+
+restore_ppu_ctrl:
+	LDA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+
+restore_registers:
+	LDA transfer_coroutine_a
+	LDX transfer_coroutine_x
+	LDY transfer_coroutine_y
+
+execute_coroutine:
+	RTI
+.ENDPROC
+
+; Shut down execution of transfer coroutine. Can be triggered directly by a BRK statement in coroutine, or via an IRQ near the end of extended vblank
+.PROC	irq_shutdown_coroutine
+	; Save coroutine registers
+save_registers:
+	STY transfer_coroutine_y
+	STX transfer_coroutine_x
+	STA transfer_coroutine_a
+
+	; Deduce PPU::ADDR value from the values of transfer_coroutine_progress and X
+save_ppu_addr:
+	LDA transfer_coroutine_progress
+	BNE @not_opaque
+	; ppu_addr = opaque_buffer_ppu_addr + (X - last_opaque_pattern_index) * 16
+	@opaque:
+		TXA
+		SEC
+		SBC last_opaque_pattern_index
+		ASL
+		ASL
+		ASL
+		ASL
+		CLC
+		ADC opaque_buffer_ppu_addr + 0
+		PHP
+		STA transfer_coroutine_ppu_addr + 0
+
+		TXA
+		SEC
+		SBC last_opaque_pattern_index
+		LSR
+		LSR
+		LSR
+		LSR
+		PLP
+		ADC opaque_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+		JMP @done
+@not_opaque:
+	CMP #1
+	BNE @not_nametable
+	; ppu_addr = nametable_buffer_ppu_addr + X
+	@nametable:
+		TXA
+		CLC
+		ADC nametable_buffer_ppu_addr + 0
+		STA transfer_coroutine_ppu_addr + 0
+
+		LDA #$00
+		ADC nametable_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+		JMP @done
+@not_nametable:
+	; ppu_addr = opaque_buffer_ppu_addr + X * 16
+	@partial:
+		TXA
+		ASL
+		ASL
+		ASL
+		ASL
+		CLC
+		ADC partial_buffer_ppu_addr + 0
+		PHP
+		STA transfer_coroutine_ppu_addr + 0
+
+		TXA
+		LSR
+		LSR
+		LSR
+		LSR
+		PLP
+		ADC partial_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+@done:
+
+	; Save coroutine return state
+save_return_state:
+	PLA
+	STA transfer_coroutine_ps
+	PLA
+	STA transfer_coroutine_pc + 0
+	PLA
+	STA transfer_coroutine_pc + 1
+
+	; Sets up a dummy interrupt if this routine was triggered manually, otherwise sets up extended vblank end interrupt and queues extended vblank start interrupt
+set_irq_vector:
+	LDX #<irq_dummy
+	LDY #>irq_dummy
+
+	; Check B flag
+	LDA transfer_coroutine_ps
+	AND #%00010000
+	BNE :+
+		LDX #<irq_end_extended_vblank
+		LDY #>irq_end_extended_vblank
+		; Only acknowledge IRQ if we didn't come from BRK
+		STA VRC6::IRQ_ACKNOWLEDGE
+		LDA #VRC6_SCANLINE 240 - EXTRA_VBLANK_TOP - EXTRA_VBLANK_BOTTOM
+		STA VRC6::IRQ_LATCH
+:	STX soft_irq_vector + 0
+	STY soft_irq_vector + 1
+
+
+	; Restores registers saved by extended vblank begin interrupt
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	RTI
+.ENDPROC
+
+; Dummied out alternative of irq_shutdown_coroutine
+; Sets up extended vblank end interrupt, queues extended vblank start interrupt
+.PROC	irq_dummy
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+save_registers:
+	PHA
+
+set_irq_vector:
+	LDA #<irq_end_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_end_extended_vblank
+	STA soft_irq_vector + 1
+
+queue_interrupt:
+	LDA #VRC6_SCANLINE 240 - EXTRA_VBLANK_TOP - EXTRA_VBLANK_BOTTOM
+	STA VRC6::IRQ_LATCH
+
+restore_registers:
+	PLA
+
+	RTI
+.ENDPROC
+
+; Ends extended vblank, sets up IRQ vector for beginning of extended vblank
+.PROC	irq_end_extended_vblank
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	; Update PPU registers based on soft counterparts
+update_registers:
+	LDA soft_ppuctrl
+	STA PPU::CTRL
+	LDA #>oam
+	STA PPU::OAMDMA
+	LDA #$00
+	STA oam_index
+
+	; Use loopy technique to set scroll for the next frame
+compute_scroll:
+	; PPU::ADDR = nametable_id << 2
+	LDA soft_ppuctrl
+	AND #%00000011
+	ASL
+	ASL
+	STA PPU::ADDR
+	; PPU::SCROLL = scroll_y
+	LDA soft_scroll_y
+	STA PPU::SCROLL
+	; PPU::SCROLL = scroll_x
+	; This is delayed until hblank
+	LDX soft_scroll_x
+	; PPU::ADDR = ((scroll_y & $F8) << 2) | (scroll_x >> 3)
+	; This is delayed until hblank
+	LDA soft_scroll_y
+	AND #%11111000
+	ASL
+	ASL
+	STA scroll_temp
+	LDA soft_scroll_x
+	LSR
+	LSR
+	LSR
+	ORA scroll_temp
+
+	; Delay until the following code executes within hblank
+delay:
+
+	; Commit final scroll state, enable rendering
+enable_rendering:
+	LDY soft_ppumask
+	STX PPU::SCROLL
+	STA PPU::ADDR
+	STY PPU::MASK
+
+	; Indicate that NMI has not yet occurred this frame
+clear_nmi_serviced:
+	LDA #$00
+	STA nmi_serviced
+
+set_irq_vector:
+	LDA #<irq_begin_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_begin_extended_vblank
+	STA soft_irq_vector + 1
+
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	RTI
+.ENDPROC
+
 
 
 
@@ -2632,15 +3139,15 @@ screen_hi:
 ; TODO: Give credit/ask permission
 .REPEAT	8, i
 	.ident(.sprintf("color_table_%d", i)):
-	.LOBYTES	%0000000000000000 >> i
-	.LOBYTES	%0001000000010000 >> i
-	.LOBYTES	%0011000000110000 >> i
-	.LOBYTES	%0111000001110000 >> i
-	.LOBYTES	%1111000011110000 >> i
-	.LOBYTES	%1111000111110001 >> i
-	.LOBYTES	%1111001111110011 >> i
-	.LOBYTES	%1111011111110111 >> i
-	.LOBYTES	%1111111111111111 >> i
+	.LOBYTES	%00000000000000000000000000000000 >> (i * 3)
+	.LOBYTES	%00010000000100000001000000010000 >> (i * 3)
+	.LOBYTES	%00110000001100000011000000110000 >> (i * 3)
+	.LOBYTES	%01110000011100000111000001110000 >> (i * 3)
+	.LOBYTES	%11110000111100001111000011110000 >> (i * 3)
+	.LOBYTES	%11110001111100011111000111110001 >> (i * 3)
+	.LOBYTES	%11110011111100111111001111110011 >> (i * 3)
+	.LOBYTES	%11110111111101111111011111110111 >> (i * 3)
+	.LOBYTES	%11111111111111111111111111111111 >> (i * 3)
 .ENDREP
 
 ; Cube model

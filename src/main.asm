@@ -22,6 +22,12 @@ pal_buffer:				.RES 32
 
 .CODE
 .PROC main
+	; TEMP
+	LDA #<nmi_render
+	STA soft_nmi_vector + 0
+	LDA #>nmi_render
+	STA soft_nmi_vector + 1
+
 
 init_pal:
 	LDA #$3F
@@ -48,9 +54,9 @@ init_pattern:
 	INX
 	BNE :-
 
-	LDA #PPU::RENDER_SP | PPU::RENDER_BG
+	LDA #PPU::MASK::RENDER_SP | PPU::MASK::RENDER_BG
 	STA soft_ppumask
-	LDA #PPU::DEFAULT_CTRL
+	LDA #PPU::CTRL::ENABLE_NMI | PPU::CTRL::BG_PATTERN_L | PPU::CTRL::SP_PATTERN_R
 	STA soft_ppuctrl
 	STA PPU::CTRL
 
@@ -140,6 +146,13 @@ test_poly_buffer:	.res 32
 	LDA #$02
 	STA $FF
 
+	JSR init_transfer_coroutine
+
+	LDA #$00
+.REPEAT 8, i
+	STA .ident(.sprintf("pattern_buffer_%d", i))
+.ENDREP
+
 forever:
 	LDX $FF
 	LDA buttons_held
@@ -191,11 +204,11 @@ forever:
 
 	; Clear partial tile allocations
 	LDA #$01
-	STA next_partial_pattern_index
+	STA partial_pattern_write_head
 
 	; Clear opaque tile allocations
-	LDA #RENDER_MAX_TILES - 1
-	STA next_opaque_pattern_index
+	LDA #$FF
+	STA opaque_pattern_write_head
 
 	LDA #$00
 	LDX #$00
@@ -222,63 +235,79 @@ forever:
 	STA $01
 
 	; Rasterize polygon with performance highlighting
-	LDA #PPU::RED_EMPHASIS | PPU::GRAYSCALE
-	ORA soft_ppumask
-	STA PPU::MASK
 	JSR rasterize_poly
-	LDA soft_ppumask
-	STA PPU::MASK
 
-	; Transfer gfx buffers
+	LDA #<test_poly
+	STA $00
+	LDA #>test_poly
+	STA $01
+	JSR rasterize_poly
+
+	;
+	LDA partial_pattern_write_head
+	STA last_partial_pattern_index
+	LDA opaque_pattern_write_head
+	STA last_opaque_pattern_index
+
+	; Destination address for nametable
+	LDX #<$2000
+	LDY #>$2000
+	LDA $7FF
+	AND #%00000001
+	BEQ :+
+		LDX #<$2400
+		LDY #>$2400
+:	STX nametable_buffer_ppu_addr + 0
+	STY nametable_buffer_ppu_addr + 1
+
+	; Destination address for patterns
+	LDX #<$0000
+	LDY #>$0000
+	LDA $7FF
+	AND #%00000001
+	BEQ :+
+		LDX #<$1000
+		LDY #>$1000
+:	STX partial_buffer_ppu_addr + 0
+	STY partial_buffer_ppu_addr + 1
+
+	; Destination address for opaque tiles
+	LDA last_opaque_pattern_index
+	ASL
+	ASL
+	ASL
+	ASL
+	CLC
+	ADC partial_buffer_ppu_addr + 0
+	PHP
+	STA opaque_buffer_ppu_addr + 0
+
+	LDA last_opaque_pattern_index
+	LSR
+	LSR
+	LSR
+	LSR
+	PLP
+	ADC partial_buffer_ppu_addr + 1
+	STA opaque_buffer_ppu_addr + 1
+
+	;
+	LDA #$01
+	STA graphics_buffers_full
+
+:	LDA graphics_buffers_empty
+	BEQ :-
 	LDA #$00
-	STA soft_ppumask
-	JSR wait_for_nmi
+	STA graphics_buffers_empty
 
-	; Transfer nametable buffer
-asd:
-	LDA #>$2000
-	STA PPU::ADDR
-	LDA #<$2000
-	STA PPU::ADDR
+	LDX #PPU::CTRL::BG_PATTERN_L | PPU::CTRL::ENABLE_NMI | %00
+	LDA $7FF
+	AND #%00000001
+	BEQ :+
+		LDX #PPU::CTRL::BG_PATTERN_R | PPU::CTRL::ENABLE_NMI | %01
+:	STX soft_ppuctrl
 
-	LDA #<(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
-	STA $00 + 0
-	LDA #>(nametable_buffer + $100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES))
-	STA $00 + 1
-	LDY #$100 - <(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES)
-	LDX #>(SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES - 1) + 1
-@loop:
-	LDA ($00), Y
-	STA PPU::DATA
-	INY
-	BNE @loop
-	INC $00 + 1
-	DEX
-	BNE @loop
-
-	; Transfer pattern buffer
-ad2:
-	LDA #>$0000
-	STA PPU::ADDR
-	LDA #<$0000
-	STA PPU::ADDR
-	LDX #$00
-@loop:
-	.REPEAT	8, i
-		LDA .ident(.sprintf("pattern_buffer_%d", i)), X
-		STA PPU::DATA
-	.ENDREP
-	LDA #$00
-	.REPEAT	8, i
-		STA PPU::DATA
-	.ENDREP
-	INX
-	CPX next_partial_pattern_index
-	BNE @loop
-
-	LDA #PPU::RENDER_SP | PPU::RENDER_BG
-	STA soft_ppumask
-	JSR wait_for_nmi
+	INC $7FF
 
 	JSR read_controller
 	JMP forever
