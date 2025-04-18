@@ -2783,11 +2783,11 @@ save_registers:
 	; We mustn't actually set the IRQ vector here, as it's not guaranteed that the extended vblank interrupt has occurred--for example, the first frame.
 	; In that case, the vector should point to the dummy irq handler
 queue_interrupts:
-	LDA #$FF - 21
+	LDA #VRC6_SCANLINE 21 + EXTRA_VBLANK_TOP - 4 - 4
 	STA VRC6::IRQ_LATCH
 	LDA #%00000011
 	STA VRC6::IRQ_CONTROL
-	LDA #$FF - EXTRA_VBLANK_TOP
+	LDA #VRC6_SCANLINE 4
 	STA VRC6::IRQ_LATCH
 
 increment_frame_count:
@@ -2820,7 +2820,7 @@ exit:
 	RTI
 .ENDPROC
 
-; Begin extended vblank, ***
+; Begin extended vblank, kick off execution of transfer coroutine
 .PROC	irq_begin_extended_vblank
 acknowledge_irq:
 	STA VRC6::IRQ_ACKNOWLEDGE
@@ -2844,12 +2844,15 @@ disable_interrupts:
 	LDA #$00
 	STA VRC6::IRQ_CONTROL
 
-	; Wait until hblank
+	; Wait until safe zone
 delay:
+	LDX #10
+:	DEX
+	BNE :-
 
 	; Disable rendering during safe zone. This code can float around, depending on which spot minimizes the necessary delay code
 disable_rendering:
-	LDA #$00
+	LDA #$00 | PPU::MASK::GRAYSCALE
 	STA PPU::MASK
 
 	; Restore state associated with coroutine
@@ -2880,7 +2883,7 @@ execute_coroutine:
 	RTI
 .ENDPROC
 
-; ****
+; Shut down execution of transfer coroutine. Can be triggered directly by a BRK statement in coroutine, or via an IRQ near the end of extended vblank
 .PROC	irq_shutdown_coroutine
 	; Save coroutine registers
 save_registers:
@@ -2976,7 +2979,7 @@ set_irq_vector:
 		LDY #>irq_end_extended_vblank
 		; Only acknowledge IRQ if we didn't come from BRK
 		STA VRC6::IRQ_ACKNOWLEDGE
-		LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
+		LDA #VRC6_SCANLINE 240 - EXTRA_VBLANK_TOP - EXTRA_VBLANK_BOTTOM
 		STA VRC6::IRQ_LATCH
 :	STX soft_irq_vector + 0
 	STY soft_irq_vector + 1
@@ -3009,7 +3012,7 @@ set_irq_vector:
 	STA soft_irq_vector + 1
 
 queue_interrupt:
-	LDA #$FF - 240 + EXTRA_VBLANK_TOP + EXTRA_VBLANK_BOTTOM
+	LDA #VRC6_SCANLINE 240 - EXTRA_VBLANK_TOP - EXTRA_VBLANK_BOTTOM
 	STA VRC6::IRQ_LATCH
 
 restore_registers:
@@ -3029,13 +3032,6 @@ save_registers:
 	PHA
 	TYA
 	PHA
-
-	; Setup the IRQ vector for the final interrupt this frame. No need to queue an additional latch value
-set_irq_vector:
-	LDA #<irq_begin_extended_vblank
-	STA soft_irq_vector + 0
-	LDA #>irq_begin_extended_vblank
-	STA soft_irq_vector + 1
 
 	; Update PPU registers based on soft counterparts
 update_registers:
@@ -3087,6 +3083,12 @@ enable_rendering:
 clear_nmi_serviced:
 	LDA #$00
 	STA nmi_serviced
+
+set_irq_vector:
+	LDA #<irq_begin_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_begin_extended_vblank
+	STA soft_irq_vector + 1
 
 restore_registers:
 	PLA
