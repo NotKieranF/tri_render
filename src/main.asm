@@ -204,11 +204,11 @@ forever:
 
 	; Clear partial tile allocations
 	LDA #$01
-	STA next_partial_pattern_index
+	STA partial_pattern_write_head
 
 	; Clear opaque tile allocations
 	LDA #$FF
-	STA next_opaque_pattern_index
+	STA opaque_pattern_write_head
 
 	LDA #$00
 	LDX #$00
@@ -237,11 +237,16 @@ forever:
 	; Rasterize polygon with performance highlighting
 	JSR rasterize_poly
 
+	LDA #<test_poly
+	STA $00
+	LDA #>test_poly
+	STA $01
+	JSR rasterize_poly
 
 	;
-	LDA next_partial_pattern_index
+	LDA partial_pattern_write_head
 	STA last_partial_pattern_index
-	LDA #$FF
+	LDA opaque_pattern_write_head
 	STA last_opaque_pattern_index
 
 	; Destination address for nametable

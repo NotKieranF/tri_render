@@ -186,18 +186,19 @@ left_edges:						.RES 8 * RASTERIZE_ROWS	; Buffer containing the leftmost pixels
 right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixels of a tile row to be rasterized
 tile_buffer_alpha:				.RES 8
 temp_mask:						.RES 1	; TODO: fold this into other temp variables
-next_partial_pattern_index:		.RES 1	; Grows upwards from $01
-last_partial_pattern_index:		.RES 1	; ___
-next_opaque_pattern_index:		.RES 1	; Grows downwards from $FF
-last_opaque_pattern_index:		.RES 1	; ___
-graphics_buffers_full:			.RES 1	; ___
-graphics_buffers_empty:			.RES 1	; ___
+partial_pattern_write_head:		.RES 1	; Grows upwards from $01
+opaque_pattern_write_head:		.RES 1	; Grows downwards from $FF
+last_partial_pattern_index:		.RES 1	; Final index in a frame
+last_opaque_pattern_index:		.RES 1	; Final index in a frame
+graphics_buffers_full:			.RES 1	; Indicates that the render thread is no longer accessing graphics buffers
+graphics_buffers_empty:			.RES 1	; Indicates that the transfer thread is no longer accessing graphics buffers
 nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
 partial_buffer_ppu_addr:		.RES 2	; Start location of current partial pattern buffer in PPU address space
 opaque_buffer_ppu_addr:			.RES 2
 frame_count:					.RES 1	; Incremented once per hardware frame
 scroll_temp:					.RES 1	; Intermediate value when computing loopy scroll
 nmi_serviced:					.RES 1	; $FF if NMI has been serviced this frame, $00 otherwise
+partial_pattern_read_head:		.RES 1	;
 
 ; Coroutine state
 transfer_coroutine_pc:			.RES 2
@@ -2239,7 +2240,7 @@ exit:
 
 		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
 		LDA (nametable_ptr), Y
-		CMP ::next_opaque_pattern_index
+		CMP ::opaque_pattern_write_head
 		BCS @loop_check
 
 		; Rasterize the current tile to a temporary alpha buffer
@@ -2271,7 +2272,7 @@ exit:
 
 		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
 		LDA (nametable_ptr), Y
-		CMP ::next_opaque_pattern_index
+		CMP ::opaque_pattern_write_head
 		BCS @loop_check
 
 		; Rasterize the current tile to a temporary alpha buffer
@@ -2338,8 +2339,8 @@ exit:
 			JMP @update_existing_tile
 	:	; If existing tile is blank, we must allocate a new one
 	@allocate_new_tile:
-		LAX next_partial_pattern_index
-		INC next_partial_pattern_index
+		LAX partial_pattern_write_head
+		INC partial_pattern_write_head
 		STA (nametable_ptr), Y
 
 		LDY poly_color
@@ -2392,15 +2393,15 @@ exit:
 		; If the current color already has an entry in opaque_tile_indices, we can write that to the nametable buffer
 		BNE :+
 			; Otherwise we must allocate a new one, and write that
-			LDA next_opaque_pattern_index
-;			DEC next_opaque_pattern_index
+			LDA opaque_pattern_write_head
+;			DEC opaque_pattern_write_head
 			STA opaque_tile_indices, X
 			; TODO: Optimize this
 			TAX
 			LDA poly_color
 			STA opaque_tile_buffer, X
-			LDA next_opaque_pattern_index
-			DEC next_opaque_pattern_index
+			LDA opaque_pattern_write_head
+			DEC opaque_pattern_write_head
 	:	STA (nametable_ptr), Y
 		RTS
 
@@ -2675,15 +2676,13 @@ transfer_nametable_buffer:
 	LDA #PPU::CTRL::INC_32 | PPU::CTRL::ENABLE_NMI
 	STA transfer_coroutine_ppu_ctrl
 	STA PPU::CTRL
+	; Y contains the hi byte of the base address of the column throughout the loop
+	LDY nametable_buffer_ppu_addr + 1
 	LDX #$00
 @loop:
-	; This could maybe be improved... STY PPU::ADDR : STX PPU::ADDR?
-	LDA nametable_buffer_ppu_addr + 1
-	STA PPU::ADDR
-	TXA
-	CLC
-	ADC nametable_buffer_ppu_addr + 0
-	STA PPU::ADDR
+	; Update base address for new column
+	STY PPU::ADDR
+	STX PPU::ADDR
 
 	; Give an opportunity for an interrupt to occur once per iteration
 	CLI
@@ -2696,7 +2695,8 @@ transfer_nametable_buffer:
 	CPX #::SCREEN_WIDTH_TILES
 	BCS :+
 		JMP @loop
-:	LDA #PPU::CTRL::INC_1 | PPU::CTRL::ENABLE_NMI
+:	; Restore increment value
+	LDA #PPU::CTRL::INC_1 | PPU::CTRL::ENABLE_NMI
 	STA transfer_coroutine_ppu_ctrl
 	STA PPU::CTRL
 	INC transfer_coroutine_progress
@@ -2712,7 +2712,7 @@ transfer_partial_buffer:
 	; Give an opportunity for an interrupt to occur once per iteration
 	CLI
 	SEI
-;	STX ___		; Later, we'll inform the main thread where we are, so rasterization can be done concurrently
+	STX partial_pattern_read_head	; Inform the main thread where we are, so rasterization can be done concurrently
 .REPEAT 8, i
 	LDA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
 	STA PPU::DATA
