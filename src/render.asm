@@ -175,12 +175,18 @@
 ;		* Kicked off by NMI
 ;		* Needs to take a constant time
 
+; Probably move the constants somewhere better later
 RASTERIZE_ROWS		= 1	; Number of tile rows to be rasterized at a time
 EXTRA_VBLANK_TOP	= 16
 EXTRA_VBLANK_BOTTOM	= 16
+.ENUM	TRANSFER_STATES
+	TRANSFERRING_NAMETABLE = 0
+	TRANSFERRING_OPAQUE
+	TRANSFERRING_PARTIAL
+	DONE
+.ENDENUM
 
 .ZEROPAGE
-display_list_indices:			.RES 32
 display_list_size:				.RES 1
 left_edges:						.RES 8 * RASTERIZE_ROWS	; Buffer containing the leftmost pixels of a tile row to be rasterized
 right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixels of a tile row to be rasterized
@@ -191,14 +197,13 @@ opaque_pattern_write_head:		.RES 1	; Grows downwards from $FF
 last_partial_pattern_index:		.RES 1	; Final index in a frame
 last_opaque_pattern_index:		.RES 1	; Final index in a frame
 graphics_buffers_full:			.RES 1	; Indicates that the render thread is no longer accessing graphics buffers
-graphics_buffers_empty:			.RES 1	; Indicates that the transfer thread is no longer accessing graphics buffers
 nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
-partial_buffer_ppu_addr:		.RES 2	; Start location of current partial pattern buffer in PPU address space
-opaque_buffer_ppu_addr:			.RES 2
-frame_count:					.RES 1	; Incremented once per hardware frame
+pattern_buffer_ppu_addr:		.RES 2	; Start location of current pattern buffer in PPU address space
+tv_frame_count:					.RES 1	; Incremented once per hardware frame
 scroll_temp:					.RES 1	; Intermediate value when computing loopy scroll
 nmi_serviced:					.RES 1	; $FF if NMI has been serviced this frame, $00 otherwise
 partial_pattern_read_head:		.RES 1	;
+render_frame_count:				.RES 1
 
 ; Coroutine state
 transfer_coroutine_pc:			.RES 2
@@ -243,6 +248,8 @@ combined_matrix:				.TAG ROT_MATRIX
 
 .BSS
 display_list_polys:				.RES 256
+display_list_ptrs_lo:			.RES 32
+display_list_ptrs_hi:			.RES 32
 transformed_vertex_cache_x:		.RES MESH_MAX_VERTICES
 transformed_vertex_cache_y:		.RES MESH_MAX_VERTICES
 transformed_vertex_cache_z:		.RES MESH_MAX_VERTICES
@@ -267,6 +274,7 @@ poly_buffer_last:				.RES 1
 .SEGMENT	"SAVERAM"
 ; Converts color IDs into pattern table indices
 ; TODO: This doesn't handle large numbers of unique shades gracefully. Probably a good idea to turn it into a hash-map
+; TODO: Rename this
 opaque_tile_indices:			.RES NUM_SHADES
 ; Converts pattern table indices into color IDs
 ; TODO: This is probably excessive in terms of RAM usage
@@ -289,34 +297,98 @@ nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
 
 
 .CODE
+; Renders a frame of the 3D scene
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A, X, Y, $00 - $1F
 .PROC	render_frame
-init:
-	; Effectively clear display list
-	LDA #$00
-	STA display_list_size
+	; 3D math to build display list goes here
+	JSR clear_buffers
+	JSR rasterize_display_list
 
-	; Generate camera rotation matrix
-	LDA camera_roll_hi
-	LDX camera_yaw_hi
-	LDY camera_pitch_hi
-	JSR setup_rot_matrix
-	LDX #.SIZEOF(ROT_MATRIX)
-:	LDA object_matrix - 1, X
-	STA camera_matrix - 1, X
-	DEX
+exit:
+	RTS
+.ENDPROC
+
+; Clears nametable and pattern table graphics buffers
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A, X
+.PROC	clear_buffers
+	; Ensure that transfer thread has at least begun consuming the previous frame's buffers
+:	LDA graphics_buffers_full
 	BNE :-
 
-	JSR clear_oam
+	; The partial pattern buffer only needs to have its write head reset
+clear_partial_tile_allocations:
+	LDA #$01
+	STA partial_pattern_write_head
+
+	; The opaque pattern buffer needs to have its write head reset, and its hashmap cleared
+clear_opaque_tile_allocations:
+	LDA #$FF
+	STA opaque_pattern_write_head
+clear_opaque_tile_indicies:
+	LDA #$00
 	LDX #$00
-	JSR render_object
+@loop:
+	STA opaque_tile_indices, X
+	INX
+	CPX #NUM_SHADES
+	BNE @loop
 
-;	LDA #$01
-;	STA camera_pos_z_lo
-;	STA camera_roll_hi
-;	INC camera_pitch_hi
+	; Ensure that the render thread has consumed the nametable buffer before touching it
+check_nametable_buffer_empty:
+	LDA transfer_coroutine_progress
+	BEQ check_nametable_buffer_empty
+	; The nametable buffer needs to be completely initialized with zeros
+clear_nametable_buffer:
+	LDA #$00
+	LDX #$00
+@loop:
+.REPEAT ::SCREEN_HEIGHT_TILES, i
+	STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BNE @loop
 
-;	JSR sort_display_list
-;	JSR draw_display_list
+	RTS
+.ENDPROC
+
+; Calls rasterize_poly for each polygon struct pointer in the display list
+;	Takes: Number of polygons to rasterize in display_list_size, pointers to polygon structs in display_list_ptrs_lo/hi
+;	Returns: Nothing
+;	Clobbers: A, X, Y, $00 - $1F
+.PROC	rasterize_display_list
+	poly_ptr					:= $00	; And $01
+
+	; Ensure that the transfer thread has consumed the opaque tile buffer before touching it during rasterization
+check_opaque_buffer_empty:
+:	LDA transfer_coroutine_progress
+	CMP #TRANSFER_STATES::DONE	; TODO: implement concurrent consumption/production, change this to ::TRANSFERRING_PARTIAL
+	BCC :-
+
+draw_display_list:
+	LDX display_list_size
+	BEQ @break
+@loop:
+	LDA display_list_ptrs_lo - 1, X
+	STA poly_ptr + 0
+	LDA display_list_ptrs_hi - 1, X
+	STA poly_ptr + 1
+
+	JSR rasterize_poly
+
+	DEC display_list_size
+	LDX display_list_size
+	BNE @loop
+@break:
+
+	; At this point it is safe for the transfer thread to begin consuming the buffers
+exit:
+	LDA #$01
+	STA graphics_buffers_full
 
 	RTS
 .ENDPROC
@@ -1643,21 +1715,21 @@ loop:
 outer_loop:
 	LDX #$01
 inner_loop:
-	LDY display_list_indices - 0, X
+;	LDY display_list_indices - 0, X
 	LDA display_list_polys + SCREEN_POLY::DEPTH_HI, Y
-	LDY display_list_indices - 1, X
+;	LDY display_list_indices - 1, X
 	CMP display_list_polys + SCREEN_POLY::DEPTH_HI, Y
 	BCC check_inner
 	BNE swap_indices
 	LDA display_list_polys + SCREEN_POLY::DEPTH_LO, Y
-	LDY display_list_indices - 0, X
+;	LDY display_list_indices - 0, X
 	CMP display_list_polys + SCREEN_POLY::DEPTH_LO, Y
 	BCS check_inner
 
 swap_indices:
-	LDA display_list_indices - 0, X
-	STA display_list_indices - 1, X
-	STY display_list_indices - 0, X
+;	LDA display_list_indices - 0, X
+;	STA display_list_indices - 1, X
+;	STY display_list_indices - 0, X
 
 check_inner:
 	INX
@@ -1670,37 +1742,6 @@ check_outer:
 	BNE outer_loop
 
 exit:
-	RTS
-.ENDPROC
-
-;
-.PROC	draw_display_list
-	cur_poly		:= $00
-	cur_vertex		:= $01
-	num_vertices	:= $02
-
-	LDX #$00
-outer_loop:
-	LDY display_list_indices, X
-	LDA display_list_polys + SCREEN_POLY::ATTR, Y
-	STA num_vertices
-	STX cur_poly
-inner_loop:
-	LDA display_list_polys + SCREEN_POLY::X_POS, Y
-	TAX
-	LDA display_list_polys + SCREEN_POLY::Y_POS, Y
-	STY cur_vertex
-	JSR plot_point
-
-	LDY cur_vertex
-	INY
-	INY
-	DEC num_vertices
-	BNE inner_loop
-
-	DEC display_list_size
-	BNE outer_loop
-
 	RTS
 .ENDPROC
 
@@ -2628,10 +2669,8 @@ bres_routine_table_hi:
 	RTS
 .ENDPROC
 
-;
-;	Takes:
-;	Returns:
-;	Clobbers:
+; Coroutine for transferring data from CPU graphics buffers to the PPU. 
+; Should be called with the interrupt inhibit flag set, which it will periodically toggle to check for a pending shutdown interrupt
 .PROC	transfer_coroutine
 	; Check whether graphics buffers are ready to be emptied
 check_buffer_status:
@@ -2646,30 +2685,39 @@ check_buffer_status:
 	; This is used when shutting down the coroutine to deduce the current value of PPU::ADDR
 	STA transfer_coroutine_progress
 
-	; Transfer opaque tiles
-transfer_opaque_buffer:
-	LDA opaque_buffer_ppu_addr + 1
-	STA PPU::ADDR
-	LDA opaque_buffer_ppu_addr + 0
-	STA PPU::ADDR
-	LDX last_opaque_pattern_index
-@loop:
-	; Give an opportunity for an interrupt to occur once per iteration
-	CLI
-	SEI
-	LDY opaque_tile_buffer, X
-.REPEAT 8, i
-	LDA .IDENT(.SPRINTF("color_table_%d", i)), Y
-	STA PPU::DATA
-.ENDREP
-	; Currently we're only handling a single bitplane
-	LDA #$00
-.REPEAT 8, i
-	STA PPU::DATA
-.ENDREP
-	INX
-	BNE @loop
-	INC transfer_coroutine_progress
+	; Initialize nametable destination buffer address based on frame parity
+init_nametable_buffer_address:
+	LDX #<$2000
+	LDY #>$2000
+	LDA render_frame_count
+	AND #%00000001
+	BEQ :+
+		LDX #<$2400
+		LDY #>$2400
+:	STX nametable_buffer_ppu_addr + 0
+	STY nametable_buffer_ppu_addr + 1
+
+	; Initialize pattern table destination buffer address based on frame parity
+init_pattern_buffer_address:
+	LDX #<$0000
+	LDY #>$0000
+	LDA render_frame_count
+	AND #%00000001
+	BEQ :+
+		LDX #<$1000
+		LDY #>$1000
+:	STX pattern_buffer_ppu_addr + 0
+	STY pattern_buffer_ppu_addr + 1
+
+	; Copy partial and opaque pattern write heads into a secondary location to be compared against
+	; This allows the main thread to access the write heads
+init_pattern_indices:
+	LDA partial_pattern_write_head
+	STA last_partial_pattern_index
+	LDX opaque_pattern_write_head
+	INX								; Write head points to the next opaque tile to be allocated, needs to be adjusted
+	STX last_opaque_pattern_index
+
 
 	; Transfer nametable_buffer
 transfer_nametable_buffer:
@@ -2701,11 +2749,51 @@ transfer_nametable_buffer:
 	STA PPU::CTRL
 	INC transfer_coroutine_progress
 
+	; Transfer opaque tiles
+transfer_opaque_buffer:
+	; ppu_addr = pattern_buffer_ppu_addr + last_opaque_pattern_index * 16
+	LDA last_opaque_pattern_index
+	BEQ @break
+	ROR
+	ROR
+	ROR
+	ROR
+	TAY
+	ROR
+	AND #%11110000
+	CLC
+	ADC pattern_buffer_ppu_addr + 0
+	TAX
+	TYA
+	AND #%00001111
+	ADC pattern_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	STX PPU::ADDR
+	LDX last_opaque_pattern_index
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+	LDY opaque_tile_buffer, X
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("color_table_%d", i)), Y
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	BNE @loop
+@break:
+	INC transfer_coroutine_progress
+
 	; Transfer partial tiles
 transfer_partial_buffer:
-	LDA partial_buffer_ppu_addr + 1
+	LDA pattern_buffer_ppu_addr + 1
 	STA PPU::ADDR
-	LDA partial_buffer_ppu_addr + 0
+	LDA pattern_buffer_ppu_addr + 0
 	STA PPU::ADDR
 	LDX #$00
 @loop:
@@ -2725,11 +2813,21 @@ transfer_partial_buffer:
 	INX
 	CPX last_partial_pattern_index
 	BCC @loop
+	INC transfer_coroutine_progress
+
+	; Swap active buffers now that we've finished transferring everything
+	; TODO: make this more general
+swap_buffers:
+	LDX #PPU::CTRL::BG_PATTERN_R | PPU::CTRL::ENABLE_NMI | %01
+	LDA render_frame_count
+	AND #%00000001
+	BNE :+
+		LDX #PPU::CTRL::BG_PATTERN_L | PPU::CTRL::ENABLE_NMI | %00
+:	STX soft_ppuctrl
 
 exit:
-	; Indicate that graphics buffers are emptied
-	LDA #$01
-	STA graphics_buffers_empty
+	; Indicate that we've completed the rendering of another frame
+	INC render_frame_count
 
 	; Endlessly loop
 	JMP transfer_coroutine
@@ -2759,6 +2857,9 @@ exit:
 
 	LDA #$00
 	STA nmi_serviced
+
+	LDA #$FF
+	STA transfer_coroutine_progress
 
 	CLI
 	RTS
@@ -2791,7 +2892,7 @@ queue_interrupts:
 	STA VRC6::IRQ_LATCH
 
 increment_frame_count:
-	INC frame_count
+	INC tv_frame_count
 
 set_nmi_serviced:
 	LDA #$FF
@@ -2894,34 +2995,6 @@ save_registers:
 	; Deduce PPU::ADDR value from the values of transfer_coroutine_progress and X
 save_ppu_addr:
 	LDA transfer_coroutine_progress
-	BNE @not_opaque
-	; ppu_addr = opaque_buffer_ppu_addr + (X - last_opaque_pattern_index) * 16
-	@opaque:
-		TXA
-		SEC
-		SBC last_opaque_pattern_index
-		ASL
-		ASL
-		ASL
-		ASL
-		CLC
-		ADC opaque_buffer_ppu_addr + 0
-		PHP
-		STA transfer_coroutine_ppu_addr + 0
-
-		TXA
-		SEC
-		SBC last_opaque_pattern_index
-		LSR
-		LSR
-		LSR
-		LSR
-		PLP
-		ADC opaque_buffer_ppu_addr + 1
-		STA transfer_coroutine_ppu_addr + 1
-		JMP @done
-@not_opaque:
-	CMP #1
 	BNE @not_nametable
 	; ppu_addr = nametable_buffer_ppu_addr + X
 	@nametable:
@@ -2936,24 +3009,21 @@ save_ppu_addr:
 		JMP @done
 @not_nametable:
 	; ppu_addr = opaque_buffer_ppu_addr + X * 16
-	@partial:
+	@pattern:
 		TXA
-		ASL
-		ASL
-		ASL
-		ASL
+		ROR
+		ROR
+		ROR
+		ROR
+		TAY
+		ROR
+		AND #%11110000
 		CLC
-		ADC partial_buffer_ppu_addr + 0
-		PHP
+		ADC pattern_buffer_ppu_addr + 0
 		STA transfer_coroutine_ppu_addr + 0
-
-		TXA
-		LSR
-		LSR
-		LSR
-		LSR
-		PLP
-		ADC partial_buffer_ppu_addr + 1
+		TYA
+		AND #%00001111
+		ADC pattern_buffer_ppu_addr + 1
 		STA transfer_coroutine_ppu_addr + 1
 @done:
 

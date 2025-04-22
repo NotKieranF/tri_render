@@ -138,10 +138,15 @@ test_poly_buffer:	.res 32
 
 	LDX #$00
 :	LDA test_poly, X
-	STA test_poly_buffer, X
+	STA display_list_polys, X
 	INX
 	CPX #.SIZEOF(test_poly)
 	BNE :-
+	LDA #<display_list_polys
+	STA display_list_ptrs_lo + 0
+	LDA #>display_list_polys
+	STA display_list_ptrs_hi + 0
+
 
 	LDA #$02
 	STA $FF
@@ -158,26 +163,26 @@ forever:
 	LDA buttons_held
 	AND #BUTTON_UP
 	BEQ :+
-		DEC test_poly_buffer + 1, X
+		DEC display_list_polys + 1, X
 :	LDA buttons_held
 	AND #BUTTON_DOWN
 	BEQ :+
-		INC test_poly_buffer + 1, X
+		INC display_list_polys + 1, X
 :	LDA buttons_held
 	AND #BUTTON_LEFT
 	BEQ :+
-		DEC test_poly_buffer + 0, X
+		DEC display_list_polys + 0, X
 :	LDA buttons_held
 	AND #BUTTON_RIGHT
 	BEQ :+
-		INC test_poly_buffer + 0, X
+		INC display_list_polys + 0, X
 :	LDA buttons_down
 	AND #BUTTON_A
 	BEQ :++
 		LDA $FF
 		CLC
 		ADC #$02
-		CMP test_poly_buffer + 0
+		CMP display_list_polys + 0
 		BCC :+
 			LDA #$02
 	:	STA $FF
@@ -189,123 +194,85 @@ forever:
 		SBC #$02
 		CMP #$02
 		BCS :+
-			LDA test_poly_buffer + 0
+			LDA display_list_polys + 0
 			SBC #$00
 	:	STA $FF
 :	LDA buttons_down
 	AND #BUTTON_SELECT
 	BEQ :+
-		INC test_poly_buffer + 1
+		INC display_list_polys + 1
 :	LDA buttons_down
 	AND #BUTTON_START
 	BEQ :+
-		DEC test_poly_buffer + 1
+		DEC display_list_polys + 1
 :
 
-	; Clear partial tile allocations
-	LDA #$01
-	STA partial_pattern_write_head
-
-	; Clear opaque tile allocations
-	LDA #$FF
-	STA opaque_pattern_write_head
-
-	LDA #$00
-	LDX #$00
-:	STA opaque_tile_indices, X
-	INX
-	CPX #NUM_SHADES
-	BNE :-
+;	; Clear partial tile allocations
+;	LDA #$01
+;	STA partial_pattern_write_head
+;
+;	; Clear opaque tile allocations
+;	LDA #$FF
+;	STA opaque_pattern_write_head
+;
+;	LDA #$00
+;	LDX #$00
+;:	STA opaque_tile_indices, X
+;	INX
+;	CPX #NUM_SHADES
+;	BNE :-
 
 	; Clear nametable buffer
-	LDA #$00
-	LDX #$00
-	@loop:
-	.REPEAT	::SCREEN_HEIGHT_TILES, i
-		STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
-	.ENDREP
-	INX
-	CPX #::SCREEN_WIDTH_TILES
-	BNE @loop
+;	LDA #$00
+;	LDX #$00
+;	@loop:
+;	.REPEAT	::SCREEN_HEIGHT_TILES, i
+;		STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+;	.ENDREP
+;	INX
+;	CPX #::SCREEN_WIDTH_TILES
+;	BNE @loop
 
 	; Setup poly pointer
 	LDA #<test_poly_buffer
 	STA $00
 	LDA #>test_poly_buffer
 	STA $01
-
-	; Rasterize polygon with performance highlighting
-	JSR rasterize_poly
-
-	LDA #<test_poly
-	STA $00
-	LDA #>test_poly
-	STA $01
-	JSR rasterize_poly
-
-	;
-	LDA partial_pattern_write_head
-	STA last_partial_pattern_index
-	LDA opaque_pattern_write_head
-	STA last_opaque_pattern_index
-
-	; Destination address for nametable
-	LDX #<$2000
-	LDY #>$2000
-	LDA $7FF
-	AND #%00000001
-	BEQ :+
-		LDX #<$2400
-		LDY #>$2400
-:	STX nametable_buffer_ppu_addr + 0
-	STY nametable_buffer_ppu_addr + 1
-
-	; Destination address for patterns
-	LDX #<$0000
-	LDY #>$0000
-	LDA $7FF
-	AND #%00000001
-	BEQ :+
-		LDX #<$1000
-		LDY #>$1000
-:	STX partial_buffer_ppu_addr + 0
-	STY partial_buffer_ppu_addr + 1
-
-	; Destination address for opaque tiles
-	LDA last_opaque_pattern_index
-	ASL
-	ASL
-	ASL
-	ASL
-	CLC
-	ADC partial_buffer_ppu_addr + 0
-	PHP
-	STA opaque_buffer_ppu_addr + 0
-
-	LDA last_opaque_pattern_index
-	LSR
-	LSR
-	LSR
-	LSR
-	PLP
-	ADC partial_buffer_ppu_addr + 1
-	STA opaque_buffer_ppu_addr + 1
-
-	;
 	LDA #$01
-	STA graphics_buffers_full
+	STA display_list_size
 
-:	LDA graphics_buffers_empty
-	BEQ :-
-	LDA #$00
-	STA graphics_buffers_empty
+	JSR render_frame
 
-	LDX #PPU::CTRL::BG_PATTERN_L | PPU::CTRL::ENABLE_NMI | %00
-	LDA $7FF
-	AND #%00000001
-	BEQ :+
-		LDX #PPU::CTRL::BG_PATTERN_R | PPU::CTRL::ENABLE_NMI | %01
-:	STX soft_ppuctrl
+;	; Rasterize polygon with performance highlighting
+;	JSR rasterize_poly
+
+;	LDA #<test_poly
+;	STA $00
+;	LDA #>test_poly
+;	STA $01
+;	JSR rasterize_poly
+
+	;
+;	LDA partial_pattern_write_head
+;	STA last_partial_pattern_index
+;	LDA opaque_pattern_write_head
+;	STA last_opaque_pattern_index
+
+	;
+;	LDA #$01
+;	STA graphics_buffers_full
+;
+;:	LDA graphics_buffers_empty
+;	BEQ :-
+;	LDA #$00
+;	STA graphics_buffers_empty
+
+;	LDX #PPU::CTRL::BG_PATTERN_L | PPU::CTRL::ENABLE_NMI | %00
+;	LDA $7FF
+;	AND #%00000001
+;	BEQ :+
+;		LDX #PPU::CTRL::BG_PATTERN_R | PPU::CTRL::ENABLE_NMI | %01
+;:	STX soft_ppuctrl
 
 	INC $7FF
 
