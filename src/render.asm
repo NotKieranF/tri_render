@@ -259,9 +259,10 @@ projected_vertex_cache_x_hi:	.RES MESH_MAX_VERTICES
 projected_vertex_cache_y_lo:	.RES MESH_MAX_VERTICES
 projected_vertex_cache_y_hi:	.RES MESH_MAX_VERTICES
 
+; Linked-list style buffers for holding the screen space vertices of the current polygon
 poly_buffer_x_lo:				.RES POLY_MAX_VERTICES
-poly_buffer_y_lo:				.RES POLY_MAX_VERTICES
 poly_buffer_x_hi:				.RES POLY_MAX_VERTICES
+poly_buffer_y_lo:				.RES POLY_MAX_VERTICES
 poly_buffer_y_hi:				.RES POLY_MAX_VERTICES
 poly_buffer_next:				.RES POLY_MAX_VERTICES
 poly_buffer_first:				.RES 1
@@ -302,11 +303,20 @@ nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
 ;	Returns: Nothing
 ;	Clobbers: A, X, Y, $00 - $1F
 .PROC	render_frame
-	; 3D math to build display list goes here
+;	JSR render_objects
+;	JSR sort_display_list
 	JSR clear_buffers
 	JSR rasterize_display_list
 
 exit:
+	RTS
+.ENDPROC
+
+;
+;
+;
+;
+.PROC	render_objects
 	RTS
 .ENDPROC
 
@@ -632,6 +642,9 @@ clip_bottom:
 	RTS
 .ENDPROC
 
+;
+;
+;
 ;
 .PROC	render_object
 	object_pos_sub			:= $00	; And $01, $02. Stored in X, Y, Z order
@@ -2492,159 +2505,6 @@ exit:
 	.ENDREP
 .ENDPROC
 
-; Draws a line from (x0, y0) to (x1, y1) using bresenham's algorithm
-;	Takes: x0, y0, x1, y1 in $1C - $1F
-;	Returns: Nothing
-;	Clobbers: A, X, Y, $19 - $1F
-.PROC	draw_line
-	x0			:= $1C
-	y0			:= $1D
-	x1			:= $1E
-	y1			:= $1F
-	slope		:= $19
-	ptr			:= $1A	; And $1B
-
-compute_dx:
-	LDY #$00			; Preload bresenham routine ID for positive dx, positive dy, dx > dy
-	LDA x1
-	SEC
-	SBC x0
-	BEQ bres_vert		; If dx = 0, we have a vertical line
-	BCS :+
-		EOR #$FF		; Negate dx if it's negative
-		ADC #$01		; assert(pscarry == 0)
-		LDY #$04		; Load bresenham routine ID for negative dx, positive dy, dx > dy
-:	TAX					; x = |dx|
-
-compute_dy:
-	LDA y1
-	SEC
-	SBC y0
-	BEQ bres_horiz		; If dy = 0, we have a horizontal line
-	BCS :+
-		EOR #$FF		; Negate dy if it's negative
-		ADC #$01		; assert(pscarry == 0)
-		INY				; Increment bresenham routine ID by two to go from positive dy -> negative dy
-		INY
-:						; a = |dy|
-
-compute_slope:
-	CMP identity, X
-	BCC :+
-		STX slope		; Swap dx and dy if dx < dy
-		TAX
-		LDA slope
-		INY				; Increment bresenham routine ID by one to go from dx > dy -> dx < dy
-:	JSR udiv_8x8bit_frac
-	STX slope
-
-get_routine:
-	LDA bres_routine_table_lo, Y
-	STA ptr + 0
-	LDA bres_routine_table_hi, Y
-	STA ptr + 1
-
-	LDX x0
-	LDY y0
-	LDA #$80
-	CLC
-	JMP (ptr)
-
-; Draw a horizontal line
-bres_horiz:
-	LDX x0
-	LDY y0
-	CPX x1
-	BCS @neg_loop
-
-@pos_loop:
-	STA $444F
-	INX
-	CPX x1
-	BNE @pos_loop
-	RTS
-
-@neg_loop:
-	STA $444F
-	DEX
-	CPX x1
-	BNE @neg_loop
-	RTS
-
-; Draw a vertical line
-bres_vert:
-	LDX x0
-	LDY y0
-	CPY y1
-	BCS @neg_loop
-
-@pos_loop:
-	STA $444F
-	INY
-	CPY y1
-	BNE @pos_loop
-	RTS
-
-@neg_loop:
-	STA $444F
-	DEY
-	CPY y1
-	BNE @neg_loop
-	RTS
-
-; Bresenham routines for the 8 different octants. Not sure if this mess of assembler directives is better than writing the individual routines out or not...
-.REPEAT	8, i
-	.PROC	.IDENT(.SPRINTF("bres_routine_%d", i))
-	@loop:
-		STA $444F
-		ADC slope			; assert(pscarry == 0)
-		BCC @no_increment_minor
-
-	@increment_minor:
-		; Move along the minor axis
-		.IF(i & %011 = %000)
-			INY
-		.ELSEIF(i & %011 = %010)
-			DEY
-		.ELSEIF(i & %101 = %001)
-			INX
-		.ELSEIF(i & %101 = %101)
-			DEX
-		.ENDIF
-		CLC
-
-	@no_increment_minor:
-		; Move along the major axis
-		.IF(i & %101 = %000)
-			INX
-		.ELSEIF(i & %101 = %100)
-			DEX
-		.ELSEIF(i & %011 = %001)
-			INY
-		.ELSEIF(i & %011 = %011)
-			DEY
-		.ENDIF
-		;
-		.IF(i & %001 = %000)
-			CPX x1
-		.ELSEIF(i & %001 = %001)
-			CPY y1
-		.ENDIF
-		BNE @loop
-		RTS
-	.ENDPROC
-.ENDREP
-
-bres_routine_table_lo:
-.LOBYTES	bres_routine_0, bres_routine_1, bres_routine_2, bres_routine_3
-.LOBYTES	bres_routine_4, bres_routine_5, bres_routine_6, bres_routine_7
-
-bres_routine_table_hi:
-.HIBYTES	bres_routine_0, bres_routine_1, bres_routine_2, bres_routine_3
-.HIBYTES	bres_routine_4, bres_routine_5, bres_routine_6, bres_routine_7
-
-.ENDPROC
-
 ; Plots a point on the screen
 ;	Takes: X position in A, and Y position in Y
 ;	Clobbers: A, X, Y
@@ -3197,11 +3057,11 @@ right_edge_mask_table:
 
 ; TODO: Need to rename these, they're multiplication tables for indexing into the screen buffer
 screen_lo:
-.REPEAT SCREEN_HEIGHT_TILES, i
+.REPEAT ::SCREEN_HEIGHT_TILES, i
 	.LOBYTES	SCREEN_WIDTH_TILES * i
 .ENDREP
 screen_hi:
-.REPEAT	SCREEN_HEIGHT_TILES, i
+.REPEAT	::SCREEN_HEIGHT_TILES, i
 	.HIBYTES	SCREEN_WIDTH_TILES * i
 .ENDREP
 
