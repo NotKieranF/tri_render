@@ -9,15 +9,21 @@
 
 
 
-; Constants
+
+
+; Camera movement constants
 CAMERA_ROT_SPEED	= $0100
 CAMERA_MOV_SPEED	= $0008
+
+
 
 
 
 .SEGMENT	"SAVERAM"
 pal_buffer:				.RES 32
 temp:					.RES 1
+
+
 
 
 
@@ -35,6 +41,7 @@ temp:					.RES 1
 	STA soft_ppuctrl
 	STA PPU::CTRL
 
+	; Load initial palette
 init_pal:
 	LDA #$3F
 	STA PPU::ADDR
@@ -47,9 +54,6 @@ init_pal:
 	INX
 	CPX #$20
 	BNE :-
-
-
-
 
 copy_polygon:
 	LDX #$00
@@ -136,19 +140,21 @@ forever:
 main_loop:
 	JSR read_controller
 	JSR move_camera
-
 	JSR render_frame
-
 	JSR wait_for_nmi
 	JMP main_loop
 .ENDPROC
 
-
+; Move camera based on controller state
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A
 .PROC	move_camera
 	LDA #BUTTON_SELECT
 	AND buttons_held
 	BEQ @translate
 
+; Face buttons and d-pad rotate camera when select is held
 @rotate:
 	LDA #BUTTON_UP
 	AND buttons_held
@@ -218,6 +224,7 @@ main_loop:
 
 :	RTS
 
+; Face buttons and d-pad translate camera when select is not held
 @translate:
 	LDA #BUTTON_UP
 	AND buttons_held
@@ -316,6 +323,7 @@ test_poly:
 .BYTE	$20, $60
 test_poly_end:
 
+.RODATA
 default_pal:
 .BYTE	$3F, $00, $10, $20
 .BYTE	$3F, $00, $10, $20
