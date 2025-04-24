@@ -2,15 +2,15 @@
 
 Tri-render is a 3D rendering engine written in 6502 assembly for the Nintendo Entertainment System.
 It is currently a work in progress, and many core features are in active development.
-That being said, the main branch has a functional point-cloud renderer that renders a model's vertices as sprites on the screen.
+That being said, the main branch has a functional polygon renderer that renders a flat shaded polygon to the screen.
 
 # Controls
 
-The control system is currently relative to a global reference frame, as opposed to being relative to the orientation of the camera.
-
-- Up/down moves along the Z-axis.
-- Left/right moves along the X-axis.
-- A/B moves along the Y-axis.
+- Up/down/left/right moves the current vertex.
+- A changes the selection to the next vertex.
+- B changes the selection to the previous vertex.
+- Start makes the polygon one step darker.
+- Select makes the polygon one step brighter.
 - Holding select while inputting the above allows you to instead rotate about a given axis.
 
 # Building

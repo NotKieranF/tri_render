@@ -121,10 +121,20 @@ forever:
 	AND #BUTTON_SELECT
 	BEQ :+
 		INC display_list_polys + 1
+		LDA #$09
+		CMP display_list_polys + 1
+		BNE :+
+			LDA #$00
+			STA display_list_polys + 1
 :	LDA buttons_down
 	AND #BUTTON_START
 	BEQ :+
 		DEC display_list_polys + 1
+		LDA #$FF
+		CMP display_list_polys + 1
+		BNE :+
+			LDA #$08
+			STA display_list_polys + 1
 :
 
 	; Setup poly pointer
@@ -334,6 +344,3 @@ default_pal:
 .BYTE	$3F, $00, $10, $20
 .BYTE	$3F, $00, $10, $20
 .BYTE	$3F, $00, $10, $20
-
-balz:
-.INCBIN	"balz.chr"
