@@ -1,10 +1,15 @@
 ; (c) Kieran Firkin
 ; TODO: Credits (poly render nesdev thread, c-hacking math, elite website), Proper License
+.INCLUDE	"call65.inc"
 .INCLUDE	"nes.h"
 .INCLUDE	"render.h"
+.INCLUDE	"irq.h"
 .INCLUDE	"nmi.h"
 .INCLUDE	"math.h"
 .INCLUDE	"objects.h"
+.INCLUDE	"vrc6.h"
+.DECLAREROUTINE	render_frame render_objects clear_buffers rasterize_display_list rasterize_poly sort_display_list project_point
+.DECLAREROUTINE	transform_point_combined_matrix render_object render_poly setup_rot_matrix
 
 ; Overview of rendering pipeline:
 ;	* 
@@ -173,17 +178,45 @@
 ;		* Kicked off by NMI
 ;		* Needs to take a constant time
 
-RASTERIZE_ROWS	= 1	; Number of tile rows to be rasterized at a time
+; Probably move the constants somewhere better later
+RASTERIZE_ROWS		= 1	; Number of tile rows to be rasterized at a time
+EXTRA_VBLANK_TOP	= 16
+EXTRA_VBLANK_BOTTOM	= 16
+.ENUM	TRANSFER_STATES
+	TRANSFERRING_NAMETABLE = 0
+	TRANSFERRING_OPAQUE
+	TRANSFERRING_PARTIAL
+	DONE
+.ENDENUM
 
 .ZEROPAGE
-display_list_indices:			.RES 32
 display_list_size:				.RES 1
 left_edges:						.RES 8 * RASTERIZE_ROWS	; Buffer containing the leftmost pixels of a tile row to be rasterized
 right_edges:					.RES 8 * RASTERIZE_ROWS	; Buffer containing the rightmost pixels of a tile row to be rasterized
 tile_buffer_alpha:				.RES 8
 temp_mask:						.RES 1	; TODO: fold this into other temp variables
-next_partial_pattern_index:		.RES 1	; Grows upwards from $01
-next_opaque_pattern_index:		.RES 1	; Grows downwards from $FF
+partial_pattern_write_head:		.RES 1	; Grows upwards from $01
+opaque_pattern_write_head:		.RES 1	; Grows downwards from $FF
+last_partial_pattern_index:		.RES 1	; Final index in a frame
+last_opaque_pattern_index:		.RES 1	; Final index in a frame
+graphics_buffers_full:			.RES 1	; Indicates that the render thread is no longer accessing graphics buffers
+nametable_buffer_ppu_addr:		.RES 2	; Start location of current nametable buffer in PPU address space
+pattern_buffer_ppu_addr:		.RES 2	; Start location of current pattern buffer in PPU address space
+tv_frame_count:					.RES 1	; Incremented once per hardware frame
+scroll_temp:					.RES 1	; Intermediate value when computing loopy scroll
+nmi_serviced:					.RES 1	; $FF if NMI has been serviced this frame, $00 otherwise
+partial_pattern_read_head:		.RES 1	;
+render_frame_count:				.RES 1
+
+; Coroutine state
+transfer_coroutine_pc:			.RES 2
+transfer_coroutine_ps:			.RES 1
+transfer_coroutine_ppu_addr:	.RES 2
+transfer_coroutine_ppu_ctrl:	.RES 1
+transfer_coroutine_a:			.RES 1
+transfer_coroutine_x:			.RES 1
+transfer_coroutine_y:			.RES 1
+transfer_coroutine_progress:	.RES 1
 
 ; Camera parameters
 camera_pos_sub:
@@ -218,6 +251,8 @@ combined_matrix:				.TAG ROT_MATRIX
 
 .BSS
 display_list_polys:				.RES 256
+display_list_ptrs_lo:			.RES 32
+display_list_ptrs_hi:			.RES 32
 transformed_vertex_cache_x:		.RES MESH_MAX_VERTICES
 transformed_vertex_cache_y:		.RES MESH_MAX_VERTICES
 transformed_vertex_cache_z:		.RES MESH_MAX_VERTICES
@@ -227,9 +262,10 @@ projected_vertex_cache_x_hi:	.RES MESH_MAX_VERTICES
 projected_vertex_cache_y_lo:	.RES MESH_MAX_VERTICES
 projected_vertex_cache_y_hi:	.RES MESH_MAX_VERTICES
 
+; Linked-list style buffers for holding the screen space vertices of the current polygon
 poly_buffer_x_lo:				.RES POLY_MAX_VERTICES
-poly_buffer_y_lo:				.RES POLY_MAX_VERTICES
 poly_buffer_x_hi:				.RES POLY_MAX_VERTICES
+poly_buffer_y_lo:				.RES POLY_MAX_VERTICES
 poly_buffer_y_hi:				.RES POLY_MAX_VERTICES
 poly_buffer_next:				.RES POLY_MAX_VERTICES
 poly_buffer_first:				.RES 1
@@ -241,7 +277,12 @@ poly_buffer_last:				.RES 1
 
 .SEGMENT	"SAVERAM"
 ; Converts color IDs into pattern table indices
+; TODO: This doesn't handle large numbers of unique shades gracefully. Probably a good idea to turn it into a hash-map
+; TODO: Rename this
 opaque_tile_indices:			.RES NUM_SHADES
+; Converts pattern table indices into color IDs
+; TODO: This is probably excessive in terms of RAM usage
+opaque_tile_buffer:				.RES 256
 
 .ALIGN	256
 ; Pattern table buffers
@@ -260,47 +301,122 @@ nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
 
 
 .CODE
-.PROC	render_frame
-init:
-	; Effectively clear display list
-	LDA #$00
-	STA display_list_size
+; Renders a frame of the 3D scene
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A, X, Y
+.ROUTINE	render_frame
+	.CALLS	render_objects clear_buffers rasterize_display_list
+;	JSR render_objects
+;	JSR sort_display_list
+	JSR clear_buffers
+	JSR rasterize_display_list
 
-	; Generate camera rotation matrix
-	LDA camera_roll_hi
-	LDX camera_yaw_hi
-	LDY camera_pitch_hi
-	JSR setup_rot_matrix
-	LDX #.SIZEOF(ROT_MATRIX)
-:	LDA object_matrix - 1, X
-	STA camera_matrix - 1, X
-	DEX
+exit:
+	RTS
+.ENDROUTINE
+
+;
+;
+;
+;
+.ROUTINE	render_objects
+	RTS
+.ENDROUTINE
+
+; Clears nametable and pattern table graphics buffers
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A, X
+.ROUTINE	clear_buffers
+	; Ensure that transfer thread has at least begun consuming the previous frame's buffers
+:	LDA graphics_buffers_full
 	BNE :-
 
-	JSR clear_oam
+	; The partial pattern buffer only needs to have its write head reset
+clear_partial_tile_allocations:
+	LDA #$01
+	STA partial_pattern_write_head
+
+	; The opaque pattern buffer needs to have its write head reset, and its hashmap cleared
+clear_opaque_tile_allocations:
+	LDA #$FF
+	STA opaque_pattern_write_head
+clear_opaque_tile_indicies:
+	LDA #$00
 	LDX #$00
-	JSR render_object
+@loop:
+	STA opaque_tile_indices, X
+	INX
+	CPX #NUM_SHADES
+	BNE @loop
 
-;	LDA #$01
-;	STA camera_pos_z_lo
-;	STA camera_roll_hi
-;	INC camera_pitch_hi
-
-;	JSR sort_display_list
-;	JSR draw_display_list
+	; Ensure that the render thread has consumed the nametable buffer before touching it
+check_nametable_buffer_empty:
+	LDA transfer_coroutine_progress
+	BEQ check_nametable_buffer_empty
+	; The nametable buffer needs to be completely initialized with zeros
+clear_nametable_buffer:
+	LDA #$00
+	LDX #$00
+@loop:
+.REPEAT ::SCREEN_HEIGHT_TILES, i
+	STA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BNE @loop
 
 	RTS
-.ENDPROC
+.ENDROUTINE
+
+; Calls rasterize_poly for each polygon struct pointer in the display list
+;	Takes: Number of polygons to rasterize in display_list_size, pointers to polygon structs in display_list_ptrs_lo/hi
+;	Returns: Nothing
+;	Clobbers: A, X, Y
+.ROUTINE	rasterize_display_list
+	.CALLS rasterize_poly
+
+	; Ensure that the transfer thread has consumed the opaque tile buffer before touching it during rasterization
+check_opaque_buffer_empty:
+:	LDA transfer_coroutine_progress
+	CMP #TRANSFER_STATES::TRANSFERRING_PARTIAL
+	BCC :-
+
+	; Display list is drawn front to back
+draw_display_list:
+	LDX display_list_size
+	BEQ @break
+@loop:
+	LDA display_list_ptrs_lo - 1, X
+	STA z:rasterize_poly::poly_ptr + 0
+	LDA display_list_ptrs_hi - 1, X
+	STA z:rasterize_poly::poly_ptr + 1
+
+	JSR rasterize_poly
+
+	DEC display_list_size
+	LDX display_list_size
+	BNE @loop
+@break:
+
+	; At this point it is safe for the transfer thread to begin consuming the buffers
+exit:
+	LDA #$01
+	STA graphics_buffers_full
+
+	RTS
+.ENDROUTINE
 
 ;
 ;	Takes: Signed 16-bit cameraspace vertex coordinates in vertex_x, vertex_y, and vertex_z
 ;	Returns: Signed 16-bit projected vertex coordinates in vertex_x and vertex_y
-;	Clobbers: A, X, Y, $1A - $1F
-.PROC	project_point
-	vertex_x		:= $1A	; And $1B
-	vertex_y		:= $1C	; And $1D
-	vertex_z		:= $1E	; And $1F
-	log_z			:= $1E
+;	Clobbers: A, X, Y
+.ROUTINE	project_point
+	.ALLOCATELOCAL	vertex_x, 2
+	.ALLOCATELOCAL	vertex_y, 2
+	.ALLOCATELOCAL	vertex_z, 2
+	.ALLOCATELOCAL	log_z
 
 check_z:
 	LDY #$00
@@ -419,19 +535,19 @@ shift_output:
 
 exit:
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Multiplies a point provided in
 ;	Takes: 7-bit signed input vector in $1A, $1B, $1C (x, y, z)
 ;	Returns: 7-bit signed output vector in $1D, $1E, $1F (x, y, z)
-;	Clobbers: A, Y, $1A - $1F
-.PROC	transform_point_combined_matrix
-	input_x			:= $1A
-	output_x		:= $1B
-	input_y			:= $1C
-	output_y		:= $1D
-	input_z			:= $1E
-	output_z		:= $1F
+;	Clobbers: A, Y
+.ROUTINE	transform_point_combined_matrix
+	.ALLOCATELOCAL	input_x
+	.ALLOCATELOCAL	output_x
+	.ALLOCATELOCAL	input_y
+	.ALLOCATELOCAL	output_y
+	.ALLOCATELOCAL	input_z
+	.ALLOCATELOCAL	output_z
 
 column_x:
 	LDA input_x
@@ -504,7 +620,7 @@ column_z:
 
 exit:
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ;
 ;
@@ -532,23 +648,28 @@ clip_bottom:
 .ENDPROC
 
 ;
-.PROC	render_object
-	object_pos_sub			:= $00	; And $01, $02. Stored in X, Y, Z order
-	object_pos_lo			:= $03	; And $04, $05. Stored in X, Y, Z order
-	object_pos_hi			:= $06	; And $07, $08. Stored in X, Y, Z order
-	mesh_rel_pos_lo			:= $00	; And $01, $02. Stored in X, Y, Z order
-	mesh_rel_pos_hi			:= $03	; And $04, $05. Stored in X, Y, Z order
-	mesh_cameraspace_x		:= $06	; And $07
-	mesh_cameraspace_y		:= $08	; And $09
-	mesh_cameraspace_z		:= $0A	; And $0B
-	loop_count				:= $0C
-	mesh_ptr				:= $0D	; And $0E. Points to mesh data
-	mesh_num_polys			:= $0F
-	mesh_vertices_x_ptr		:= $00	; And $01. Points to list of vertex X components
-	mesh_vertices_y_ptr		:= $02	; And $03. Points to list of vertex Y components
-	mesh_vertices_z_ptr		:= $04	; And $05. Points to list of vertex Z components
-	mesh_poly_ptr			:= $10	; And $11. Points to list of polygons
-;	poly_num_vertices		:= $15	
+;
+;
+;
+.ROUTINE	render_object
+	.CALLS	render_poly project_point
+	.ALLOCATELOCAL	object_pos_sub, 3	; Stored in X, Y, Z order
+	.ALLOCATELOCAL	object_pos_lo, 3	; Stored in X, Y, Z order
+	.ALLOCATELOCAL	object_pos_hi, 3	; Stored in X, Y, Z order
+	mesh_rel_pos_lo := object_pos_sub
+	mesh_rel_pos_hi := object_pos_hi
+;	.ALLOCATELOCAL	mesh_rel_pos_lo, 3	; Stored in X, Y, Z order
+;	.ALLOCATELOCAL	mesh_rel_pos_hi, 3	; Stored in X, Y, Z order
+	.ALLOCATELOCAL	mesh_cameraspace_x, 2
+	.ALLOCATELOCAL	mesh_cameraspace_y, 2
+	.ALLOCATELOCAL	mesh_cameraspace_z, 2
+	.ALLOCATELOCAL	loop_count
+	.ALLOCATELOCAL	mesh_ptr, 2
+	.ALLOCATELOCAL	mesh_num_polys
+	.ALLOCATELOCAL	mesh_vertices_x_ptr, 2
+	.ALLOCATELOCAL	mesh_vertices_y_ptr, 2
+	.ALLOCATELOCAL	mesh_vertices_z_ptr, 2
+	.ALLOCATELOCAL	mesh_poly_ptr, 2	
 
 	LDA object_pos_x_sub, X
 	STA object_pos_sub + 0
@@ -765,7 +886,7 @@ draw_origin:
 @skip:
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ;
 ;	Takes:
@@ -815,17 +936,18 @@ draw_origin:
 ;	slope = ydiff / xdiff
 ;	y1 + slope * (x - x1)
 ;
-.PROC	render_poly
-	prev_vertex		:= $14
-	cur_vertex		:= $15
-	poly_index		:= $16
-	num_vertices	:= $17
-	cur_parity		:= $18
-	prev_parity		:= $19
-	x_diff			:= $1A
-	interpolated_x	:= $1B	; And $1C
-	y_diff			:= $1D
-	interpolated_y	:= $1E	; And $1F
+.ROUTINE	render_poly
+	.CALLS transform_point_combined_matrix project_point
+	.ALLOCATELOCAL	prev_vertex
+	.ALLOCATELOCAL	cur_vertex
+	.ALLOCATELOCAL	poly_index
+	.ALLOCATELOCAL	num_vertices
+	.ALLOCATELOCAL	cur_parity
+	.ALLOCATELOCAL	prev_parity
+	.ALLOCATELOCAL	x_diff
+	.ALLOCATELOCAL	interpolated_x, 2
+	.ALLOCATELOCAL	y_diff
+	.ALLOCATELOCAL	interpolated_y, 2
 
 	INSIDE			= $01
 	OUTSIDE			= $00
@@ -1205,20 +1327,19 @@ temp_test:
 	BNE @loop
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Sets up a rotation matrix based on Tait-Bryan angles provided
 ;	Takes: Yaw in X, pitch in Y, roll in A
 ;	Returns: Rotation matrix in object_matrix
-;	Clobbers: A, X, Y, $1B - $1F
+;	Clobbers: A, X, Y
 ;	~411 cycles
-.PROC	setup_rot_matrix
-yaw			:= $1B		; Tait-Bryan angles
-pitch		:= $1C
-roll		:= $1D
-
-y_plus_p	:= $1E		; Common angle calculations
-y_minus_p	:= $1F
+.ROUTINE	setup_rot_matrix
+	.ALLOCATELOCAL	yaw
+	.ALLOCATELOCAL	pitch
+	.ALLOCATELOCAL	roll
+	.ALLOCATELOCAL	y_plus_p
+	.ALLOCATELOCAL	y_minus_p
 
 	STX yaw
 	STY pitch
@@ -1527,14 +1648,14 @@ compute_yy_yz:
 
 	STA $4400
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Premultiplies object_matrix by camera_matrix and stores the result in combined_matrix
 ;	Could do with its own multiplication routine, as its precision requirements are unique
 ;	Could proooobably massage it to loop 9 times instead of 3 to reduce code size, but matrix math is melting my brain so not today. 
 ;	Plus it would increase run time by a fair bit, 3 extra zeropage loads per iteration-ish I think.
 ;	Clobbers: A, X, Y, $1F
-.PROC	matrix_multiply
+.ROUTINE	matrix_multiply
 
 loop:
 	LDA camera_matrix + ROT_MATRIX::XX, X
@@ -1601,34 +1722,34 @@ loop:
 :
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Sorts display_list_indices from nearest to farthest
 ;	Requires display_list_indices to be in zp
-;	Clobbers: A, X, Y, $1F
-.PROC	sort_display_list
-	outer_loop_count	:= $1F
+;	Clobbers: A, X, Y
+.ROUTINE	sort_display_list
+	.ALLOCATELOCAL	outer_loop_count
 
 	LDA display_list_size
 	STA outer_loop_count
 outer_loop:
 	LDX #$01
 inner_loop:
-	LDY display_list_indices - 0, X
+;	LDY display_list_indices - 0, X
 	LDA display_list_polys + SCREEN_POLY::DEPTH_HI, Y
-	LDY display_list_indices - 1, X
+;	LDY display_list_indices - 1, X
 	CMP display_list_polys + SCREEN_POLY::DEPTH_HI, Y
 	BCC check_inner
 	BNE swap_indices
 	LDA display_list_polys + SCREEN_POLY::DEPTH_LO, Y
-	LDY display_list_indices - 0, X
+;	LDY display_list_indices - 0, X
 	CMP display_list_polys + SCREEN_POLY::DEPTH_LO, Y
 	BCS check_inner
 
 swap_indices:
-	LDA display_list_indices - 0, X
-	STA display_list_indices - 1, X
-	STY display_list_indices - 0, X
+;	LDA display_list_indices - 0, X
+;	STA display_list_indices - 1, X
+;	STY display_list_indices - 0, X
 
 check_inner:
 	INX
@@ -1642,78 +1763,47 @@ check_outer:
 
 exit:
 	RTS
-.ENDPROC
-
-;
-.PROC	draw_display_list
-	cur_poly		:= $00
-	cur_vertex		:= $01
-	num_vertices	:= $02
-
-	LDX #$00
-outer_loop:
-	LDY display_list_indices, X
-	LDA display_list_polys + SCREEN_POLY::ATTR, Y
-	STA num_vertices
-	STX cur_poly
-inner_loop:
-	LDA display_list_polys + SCREEN_POLY::X_POS, Y
-	TAX
-	LDA display_list_polys + SCREEN_POLY::Y_POS, Y
-	STY cur_vertex
-	JSR plot_point
-
-	LDY cur_vertex
-	INY
-	INY
-	DEC num_vertices
-	BNE inner_loop
-
-	DEC display_list_size
-	BNE outer_loop
-
-	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Rasterizes a single polygon to nametable_buffer and pattern_buffer. Vertices should be stored in clockwise order, sorted such that the topmost vertex is first,
 ; preferring the leftmost vertex if ambiguous.
-;	Takes: Pointer to screenspace polygon struct in $00 - $01
+;	Takes: Pointer to screenspace polygon struct in poly_ptr
 ;	Returns: Nothing
-;	Clobbers: A, X, Y, $00 - $1F
-.PROC	rasterize_poly
+;	Clobbers: A, X, Y
+.ROUTINE	rasterize_poly
 	TILE_MASK					= %11111000
 	PIXEL_MASK					= %00000111
 
-	poly_ptr					:= $00	; And $01
-	left_index					:= $02
-	right_index					:= $03
-	poly_color					:= $04
-	leftmost_pixel				:= $05
-	rightmost_pixel				:= $06
-	tile_row					:= $07
+	.ALLOCATELOCAL	poly_ptr, 2
+	.ALLOCATELOCAL	left_index
+	.ALLOCATELOCAL	right_index
+	.ALLOCATELOCAL	poly_color
+	.ALLOCATELOCAL	leftmost_pixel
+	.ALLOCATELOCAL	rightmost_pixel
+	.ALLOCATELOCAL	tile_row
 
 	; Bresenham state for edge stepping
-	bres_current_x_l			:= $08
-	bres_current_x_r			:= $09
-	bres_current_y_l			:= $0A
-	bres_current_y_r			:= $0B
-	bres_target_x_l				:= $0C
-	bres_target_x_r				:= $0D
-	bres_target_y_l				:= $0E
-	bres_target_y_r				:= $0F
-	bres_target_y_relative_l	:= $10
-	bres_target_y_relative_r	:= $11
-	bres_routine_ptr_l			:= $12	; And $13
-	bres_routine_ptr_r			:= $14	; And $15
-	bres_slope_l				:= $16
-	bres_slope_r				:= $17
-	bres_residual_l				:= $18
-	bres_residual_r				:= $19
+	.ALLOCATELOCAL	bres_current_x_l
+	.ALLOCATELOCAL	bres_current_x_r
+	.ALLOCATELOCAL	bres_current_y_l
+	.ALLOCATELOCAL	bres_current_y_r
+	.ALLOCATELOCAL	bres_target_x_l
+	.ALLOCATELOCAL	bres_target_x_r
+	.ALLOCATELOCAL	bres_target_y_l
+	.ALLOCATELOCAL	bres_target_y_r
+	.ALLOCATELOCAL	bres_target_y_relative_l
+	.ALLOCATELOCAL	bres_target_y_relative_r
+	.ALLOCATELOCAL	bres_routine_ptr_l, 2
+	.ALLOCATELOCAL	bres_routine_ptr_r, 2
+	.ALLOCATELOCAL	bres_slope_l
+	.ALLOCATELOCAL	bres_slope_r
+	.ALLOCATELOCAL	bres_residual_l
+	.ALLOCATELOCAL	bres_residual_r
 
 	; Pointers for rasterizing tile rows
-	right_edge_mask_ptr			:= $1A	; And $1B
-	left_edge_mask_ptr			:= $1C	; And $1D
-	nametable_ptr				:= $1E	; And $1F
+	.ALLOCATELOCAL	right_edge_mask_ptr, 2
+	.ALLOCATELOCAL	left_edge_mask_ptr, 2
+	.ALLOCATELOCAL	nametable_ptr, 2
 
 	LDY #$00
 get_size:
@@ -1897,10 +1987,10 @@ exit:
 	;		leaves it pointing at the final byte of the next vertex in counterclockwise order
 	;	Takes:
 	;	Returns:
-	;	Clobbers: A, X, Y, $1E - $1F
+	;	Clobbers: A, X, Y
 	.PROC	read_vertex_left
-		routine_index		:= $1F
-		dy					:= $1E
+		routine_index		:= nametable_ptr + 0
+		dy					:= nametable_ptr + 1
 
 		STX bres_current_y_l
 		STY bres_current_x_l
@@ -2063,10 +2153,10 @@ exit:
 	;		and leaves it pointing at the last byte of the current vertex
 	;	Takes: Current X position in Y, current Y position in X
 	;	Returns: C = 1 if next vertex is higher than current vertex
-	;	Clobbers: A, X, Y, $1E - $1F
+	;	Clobbers: A, X, Y
 	.PROC	read_vertex_right
-		routine_index		:= $1F
-		dx					:= $1E
+		routine_index		:= nametable_ptr + 0
+		dx					:= nametable_ptr + 1
 
 		STX bres_current_y_r
 		STY bres_current_x_r
@@ -2211,7 +2301,7 @@ exit:
 
 		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
 		LDA (nametable_ptr), Y
-		CMP ::next_opaque_pattern_index
+		CMP ::opaque_pattern_write_head
 		BCS @loop_check
 
 		; Rasterize the current tile to a temporary alpha buffer
@@ -2243,7 +2333,7 @@ exit:
 
 		; Check whether there's already a fully opaque tile here. If there is, we can skip to the next tile
 		LDA (nametable_ptr), Y
-		CMP ::next_opaque_pattern_index
+		CMP ::opaque_pattern_write_head
 		BCS @loop_check
 
 		; Rasterize the current tile to a temporary alpha buffer
@@ -2310,8 +2400,10 @@ exit:
 			JMP @update_existing_tile
 	:	; If existing tile is blank, we must allocate a new one
 	@allocate_new_tile:
-		LAX next_partial_pattern_index
-		INC next_partial_pattern_index
+		LAX partial_pattern_write_head
+	:	CMP partial_pattern_read_head
+		BCS :-
+		INC partial_pattern_write_head
 		STA (nametable_ptr), Y
 
 		LDY poly_color
@@ -2359,14 +2451,21 @@ exit:
 		BNE @update_existing_tile
 		; If existing tile is blank, all we need to do is update the nametable buffer
 	@allocate_new_tile:
+		; TODO: This could probably be pulled out of the loop
 		LDX poly_color
 		LDA opaque_tile_indices, X
 		; If the current color already has an entry in opaque_tile_indices, we can write that to the nametable buffer
 		BNE :+
 			; Otherwise we must allocate a new one, and write that
-			LDA next_opaque_pattern_index
-			DEC next_opaque_pattern_index
+			LDA opaque_pattern_write_head
+;			DEC opaque_pattern_write_head
 			STA opaque_tile_indices, X
+			; TODO: Optimize this
+			TAX
+			LDA poly_color
+			STA opaque_tile_buffer, X
+			LDA opaque_pattern_write_head
+			DEC opaque_pattern_write_head
 	:	STA (nametable_ptr), Y
 		RTS
 
@@ -2414,165 +2513,12 @@ exit:
 	.REPEAT	32, i
 		.LOBYTES (i << 3) ^ $FF
 	.ENDREP
-.ENDPROC
-
-; Draws a line from (x0, y0) to (x1, y1) using bresenham's algorithm
-;	Takes: x0, y0, x1, y1 in $1C - $1F
-;	Returns: Nothing
-;	Clobbers: A, X, Y, $19 - $1F
-.PROC	draw_line
-	x0			:= $1C
-	y0			:= $1D
-	x1			:= $1E
-	y1			:= $1F
-	slope		:= $19
-	ptr			:= $1A	; And $1B
-
-compute_dx:
-	LDY #$00			; Preload bresenham routine ID for positive dx, positive dy, dx > dy
-	LDA x1
-	SEC
-	SBC x0
-	BEQ bres_vert		; If dx = 0, we have a vertical line
-	BCS :+
-		EOR #$FF		; Negate dx if it's negative
-		ADC #$01		; assert(pscarry == 0)
-		LDY #$04		; Load bresenham routine ID for negative dx, positive dy, dx > dy
-:	TAX					; x = |dx|
-
-compute_dy:
-	LDA y1
-	SEC
-	SBC y0
-	BEQ bres_horiz		; If dy = 0, we have a horizontal line
-	BCS :+
-		EOR #$FF		; Negate dy if it's negative
-		ADC #$01		; assert(pscarry == 0)
-		INY				; Increment bresenham routine ID by two to go from positive dy -> negative dy
-		INY
-:						; a = |dy|
-
-compute_slope:
-	CMP identity, X
-	BCC :+
-		STX slope		; Swap dx and dy if dx < dy
-		TAX
-		LDA slope
-		INY				; Increment bresenham routine ID by one to go from dx > dy -> dx < dy
-:	JSR udiv_8x8bit_frac
-	STX slope
-
-get_routine:
-	LDA bres_routine_table_lo, Y
-	STA ptr + 0
-	LDA bres_routine_table_hi, Y
-	STA ptr + 1
-
-	LDX x0
-	LDY y0
-	LDA #$80
-	CLC
-	JMP (ptr)
-
-; Draw a horizontal line
-bres_horiz:
-	LDX x0
-	LDY y0
-	CPX x1
-	BCS @neg_loop
-
-@pos_loop:
-	STA $444F
-	INX
-	CPX x1
-	BNE @pos_loop
-	RTS
-
-@neg_loop:
-	STA $444F
-	DEX
-	CPX x1
-	BNE @neg_loop
-	RTS
-
-; Draw a vertical line
-bres_vert:
-	LDX x0
-	LDY y0
-	CPY y1
-	BCS @neg_loop
-
-@pos_loop:
-	STA $444F
-	INY
-	CPY y1
-	BNE @pos_loop
-	RTS
-
-@neg_loop:
-	STA $444F
-	DEY
-	CPY y1
-	BNE @neg_loop
-	RTS
-
-; Bresenham routines for the 8 different octants. Not sure if this mess of assembler directives is better than writing the individual routines out or not...
-.REPEAT	8, i
-	.PROC	.IDENT(.SPRINTF("bres_routine_%d", i))
-	@loop:
-		STA $444F
-		ADC slope			; assert(pscarry == 0)
-		BCC @no_increment_minor
-
-	@increment_minor:
-		; Move along the minor axis
-		.IF(i & %011 = %000)
-			INY
-		.ELSEIF(i & %011 = %010)
-			DEY
-		.ELSEIF(i & %101 = %001)
-			INX
-		.ELSEIF(i & %101 = %101)
-			DEX
-		.ENDIF
-		CLC
-
-	@no_increment_minor:
-		; Move along the major axis
-		.IF(i & %101 = %000)
-			INX
-		.ELSEIF(i & %101 = %100)
-			DEX
-		.ELSEIF(i & %011 = %001)
-			INY
-		.ELSEIF(i & %011 = %011)
-			DEY
-		.ENDIF
-		;
-		.IF(i & %001 = %000)
-			CPX x1
-		.ELSEIF(i & %001 = %001)
-			CPY y1
-		.ENDIF
-		BNE @loop
-		RTS
-	.ENDPROC
-.ENDREP
-
-bres_routine_table_lo:
-.LOBYTES	bres_routine_0, bres_routine_1, bres_routine_2, bres_routine_3
-.LOBYTES	bres_routine_4, bres_routine_5, bres_routine_6, bres_routine_7
-
-bres_routine_table_hi:
-.HIBYTES	bres_routine_0, bres_routine_1, bres_routine_2, bres_routine_3
-.HIBYTES	bres_routine_4, bres_routine_5, bres_routine_6, bres_routine_7
-
-.ENDPROC
+.ENDROUTINE
 
 ; Plots a point on the screen
 ;	Takes: X position in A, and Y position in Y
 ;	Clobbers: A, X, Y
-.PROC	plot_point
+.ROUTINE	plot_point
 	LDY oam_index
 
 	STA oam + OAM::Y_POS, Y
@@ -2591,6 +2537,514 @@ bres_routine_table_hi:
 	STY oam_index
 
 	RTS
+.ENDROUTINE
+
+; Coroutine for transferring data from CPU graphics buffers to the PPU. 
+; Should be called with the interrupt inhibit flag set, which it will periodically toggle to check for a pending shutdown interrupt
+.PROC	transfer_coroutine
+	; Check whether graphics buffers are ready to be emptied
+check_buffer_status:
+	LDA graphics_buffers_full
+	BNE :+
+		; Yield if not
+		BRK #$00
+		JMP check_buffer_status
+:	LDA #$00
+	STA graphics_buffers_full
+	; Initialize a counter that is incremented each time we progress to emptying a new buffer
+	; This is used when shutting down the coroutine to deduce the current value of PPU::ADDR
+	STA transfer_coroutine_progress
+
+	; Initialize nametable destination buffer address based on frame parity
+init_nametable_buffer_address:
+	LDX #<$2000
+	LDY #>$2000
+	LDA render_frame_count
+	AND #%00000001
+	BEQ :+
+		LDX #<$2400
+		LDY #>$2400
+:	STX nametable_buffer_ppu_addr + 0
+	STY nametable_buffer_ppu_addr + 1
+
+	; Initialize pattern table destination buffer address based on frame parity
+init_pattern_buffer_address:
+	LDX #<$0000
+	LDY #>$0000
+	LDA render_frame_count
+	AND #%00000001
+	BEQ :+
+		LDX #<$1000
+		LDY #>$1000
+:	STX pattern_buffer_ppu_addr + 0
+	STY pattern_buffer_ppu_addr + 1
+
+	; Copy partial and opaque pattern write heads into a secondary location to be compared against
+	; This allows the main thread to access the write heads
+init_pattern_indices:
+	LDA partial_pattern_write_head
+	STA last_partial_pattern_index
+
+	LDX opaque_pattern_write_head
+	INX								; Write head points to the next opaque tile to be allocated, needs to be adjusted
+	STX last_opaque_pattern_index
+
+	LDA #$00
+	STA partial_pattern_read_head
+
+	; Transfer nametable_buffer
+transfer_nametable_buffer:
+	LDA #PPU::CTRL::INC_32 | PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+	; Y contains the hi byte of the base address of the column throughout the loop
+	LDY nametable_buffer_ppu_addr + 1
+	LDX #$00
+@loop:
+	; Update base address for new column
+	STY PPU::ADDR
+	STX PPU::ADDR
+
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+.REPEAT	::SCREEN_HEIGHT_TILES, i
+	LDA nametable_buffer + i * ::SCREEN_WIDTH_TILES, X
+	STA PPU::DATA
+.ENDREP
+	INX
+	CPX #::SCREEN_WIDTH_TILES
+	BCS :+
+		JMP @loop
+:	; Restore increment value
+	LDA #PPU::CTRL::INC_1 | PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+	INC transfer_coroutine_progress
+
+	; Transfer opaque tiles
+transfer_opaque_buffer:
+	; ppu_addr = pattern_buffer_ppu_addr + last_opaque_pattern_index * 16
+	LDA last_opaque_pattern_index
+	BEQ @break
+	ROR
+	ROR
+	ROR
+	ROR
+	TAY
+	ROR
+	AND #%11110000
+	CLC
+	ADC pattern_buffer_ppu_addr + 0
+	TAX
+	TYA
+	AND #%00001111
+	ADC pattern_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	STX PPU::ADDR
+	LDX last_opaque_pattern_index
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+	LDY opaque_tile_buffer, X
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("color_table_%d", i)), Y
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	BNE @loop
+@break:
+	INC transfer_coroutine_progress
+
+	; Transfer partial tiles
+transfer_partial_buffer:
+	LDA pattern_buffer_ppu_addr + 1
+	STA PPU::ADDR
+	LDA pattern_buffer_ppu_addr + 0
+	STA PPU::ADDR
+	LDX #$00
+@loop:
+	; Give an opportunity for an interrupt to occur once per iteration
+	CLI
+	SEI
+	STX partial_pattern_read_head	; Inform the main thread where we are, so rasterization can be done concurrently
+.REPEAT 8, i
+	LDA .IDENT(.SPRINTF("pattern_buffer_%d", i)), X
+	STA PPU::DATA
+.ENDREP
+	; Currently we're only handling a single bitplane
+	LDA #$00
+.REPEAT 8, i
+	STA PPU::DATA
+.ENDREP
+	INX
+	CPX last_partial_pattern_index
+	BCC @loop
+	INC transfer_coroutine_progress
+	; Indiate that partial pattern buffer is fully consumed
+	LDA #$FF
+	STA partial_pattern_read_head
+
+	; Swap active buffers now that we've finished transferring everything
+	; TODO: make this more general
+swap_buffers:
+	LDX #PPU::CTRL::BG_PATTERN_R | PPU::CTRL::ENABLE_NMI | %01
+	LDA render_frame_count
+	AND #%00000001
+	BNE :+
+		LDX #PPU::CTRL::BG_PATTERN_L | PPU::CTRL::ENABLE_NMI | %00
+:	STX soft_ppuctrl
+
+exit:
+	; Indicate that we've completed the rendering of another frame
+	INC render_frame_count
+
+	; Endlessly loop
+	JMP transfer_coroutine
+.ENDPROC
+
+; TODO: Wrap this into an init_render routine
+;	Takes: Nothing
+;	Returns: Nothing
+;	Clobbers: A
+.PROC	init_transfer_coroutine
+	; Interruptions here could cause race conditions
+	SEI
+
+	LDA #<transfer_coroutine
+	STA transfer_coroutine_pc + 0
+	LDA #>transfer_coroutine
+	STA transfer_coroutine_pc + 1
+
+	LDA #PPU::CTRL::ENABLE_NMI
+	STA transfer_coroutine_ppu_ctrl
+
+	;
+	LDA #<irq_dummy
+	STA soft_irq_vector + 0
+	LDA #>irq_dummy
+	STA soft_irq_vector + 1
+
+	LDA #$00
+	STA nmi_serviced
+
+	LDA #$FF
+	STA transfer_coroutine_progress
+	STA partial_pattern_read_head
+
+	CLI
+	RTS
+.ENDPROC
+
+; Cut-down NMI handler for use with extended vblank
+; Queues coroutine-shutdown interrupt and extended vblank end interrupt, increments frame counter
+.PROC	nmi_render
+	; Check whether NMI has been serviced this frame already
+check_nmi_serviced:
+	BIT nmi_serviced
+	BMI exit
+
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	; Queue coroutine-shutdown interrupt and extended vblank end interrupt
+	; We mustn't actually set the IRQ vector here, as it's not guaranteed that the extended vblank interrupt has occurred--for example, the first frame.
+	; In that case, the vector should point to the dummy irq handler
+queue_interrupts:
+	LDA #VRC6_SCANLINE 21 + EXTRA_VBLANK_TOP - 4 - 4
+	STA VRC6::IRQ_LATCH
+	LDA #%00000011
+	STA VRC6::IRQ_CONTROL
+	LDA #VRC6_SCANLINE 4
+	STA VRC6::IRQ_LATCH
+
+increment_frame_count:
+	INC tv_frame_count
+
+set_nmi_serviced:
+	LDA #$FF
+	STA nmi_serviced
+
+	; Set the carry flag if NMI ate a BRK instruction
+check_b_flag:
+	TSX
+	LDA $0100 + 4, X
+	AND #%00010000
+	ADC #%11111110
+
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	; Execute IRQ handler if we detected NMI ate a BRK instruction
+do_irq:
+	BCC exit
+		JMP (soft_irq_vector)
+
+exit:
+	RTI
+.ENDPROC
+
+; Begin extended vblank, kick off execution of transfer coroutine
+.PROC	irq_begin_extended_vblank
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	; Set vector for shutdown IRQ. Later, NMI will queue the interrupt
+set_irq_vector:
+	LDA #<irq_shutdown_coroutine
+	STA soft_irq_vector + 0
+	LDA #>irq_shutdown_coroutine
+	STA soft_irq_vector + 1
+
+	; Furthermore, we should halt any interrupts until NMI enables them later
+disable_interrupts:
+	LDA #$00
+	STA VRC6::IRQ_CONTROL
+
+	; Wait until safe zone
+delay:
+	LDX #10
+:	DEX
+	BNE :-
+
+	; Disable rendering during safe zone. This code can float around, depending on which spot minimizes the necessary delay code
+disable_rendering:
+	LDA #$00 | PPU::MASK::GRAYSCALE
+	STA PPU::MASK
+
+	; Restore state associated with coroutine
+restore_return_state:
+	LDA transfer_coroutine_pc + 1
+	PHA
+	LDA transfer_coroutine_pc + 0
+	PHA
+	LDA transfer_coroutine_ps
+	PHA
+
+restore_ppu_addr:
+	LDA transfer_coroutine_ppu_addr + 1
+	STA PPU::ADDR
+	LDA transfer_coroutine_ppu_addr + 0
+	STA PPU::ADDR
+
+restore_ppu_ctrl:
+	LDA transfer_coroutine_ppu_ctrl
+	STA PPU::CTRL
+
+restore_registers:
+	LDA transfer_coroutine_a
+	LDX transfer_coroutine_x
+	LDY transfer_coroutine_y
+
+execute_coroutine:
+	RTI
+.ENDPROC
+
+; Shut down execution of transfer coroutine. Can be triggered directly by a BRK statement in coroutine, or via an IRQ near the end of extended vblank
+.PROC	irq_shutdown_coroutine
+	; Save coroutine registers
+save_registers:
+	STY transfer_coroutine_y
+	STX transfer_coroutine_x
+	STA transfer_coroutine_a
+
+	; Deduce PPU::ADDR value from the values of transfer_coroutine_progress and X
+save_ppu_addr:
+	LDA transfer_coroutine_progress
+	BNE @not_nametable
+	; ppu_addr = nametable_buffer_ppu_addr + X
+	@nametable:
+		TXA
+		CLC
+		ADC nametable_buffer_ppu_addr + 0
+		STA transfer_coroutine_ppu_addr + 0
+
+		LDA #$00
+		ADC nametable_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+		JMP @done
+@not_nametable:
+	; ppu_addr = opaque_buffer_ppu_addr + X * 16
+	@pattern:
+		TXA
+		ROR
+		ROR
+		ROR
+		ROR
+		TAY
+		ROR
+		AND #%11110000
+		CLC
+		ADC pattern_buffer_ppu_addr + 0
+		STA transfer_coroutine_ppu_addr + 0
+		TYA
+		AND #%00001111
+		ADC pattern_buffer_ppu_addr + 1
+		STA transfer_coroutine_ppu_addr + 1
+@done:
+
+	; Save coroutine return state
+save_return_state:
+	PLA
+	STA transfer_coroutine_ps
+	PLA
+	STA transfer_coroutine_pc + 0
+	PLA
+	STA transfer_coroutine_pc + 1
+
+	; Sets up a dummy interrupt if this routine was triggered manually, otherwise sets up extended vblank end interrupt and queues extended vblank start interrupt
+set_irq_vector:
+	LDX #<irq_dummy
+	LDY #>irq_dummy
+
+	; Check B flag
+	LDA transfer_coroutine_ps
+	AND #%00010000
+	BNE :+
+		LDX #<irq_end_extended_vblank
+		LDY #>irq_end_extended_vblank
+		; Only acknowledge IRQ if we didn't come from BRK
+		STA VRC6::IRQ_ACKNOWLEDGE
+		LDA #VRC6_SCANLINE 240 - EXTRA_VBLANK_TOP - EXTRA_VBLANK_BOTTOM
+		STA VRC6::IRQ_LATCH
+:	STX soft_irq_vector + 0
+	STY soft_irq_vector + 1
+
+
+	; Restores registers saved by extended vblank begin interrupt
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	RTI
+.ENDPROC
+
+; Dummied out alternative of irq_shutdown_coroutine
+; Sets up extended vblank end interrupt, queues extended vblank start interrupt
+.PROC	irq_dummy
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+save_registers:
+	PHA
+
+set_irq_vector:
+	LDA #<irq_end_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_end_extended_vblank
+	STA soft_irq_vector + 1
+
+queue_interrupt:
+	LDA #VRC6_SCANLINE 240 - EXTRA_VBLANK_TOP - EXTRA_VBLANK_BOTTOM
+	STA VRC6::IRQ_LATCH
+
+restore_registers:
+	PLA
+
+	RTI
+.ENDPROC
+
+; Ends extended vblank, sets up IRQ vector for beginning of extended vblank
+.PROC	irq_end_extended_vblank
+acknowledge_irq:
+	STA VRC6::IRQ_ACKNOWLEDGE
+
+save_registers:
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+
+	; Update PPU registers based on soft counterparts
+update_registers:
+	LDA soft_ppuctrl
+	STA PPU::CTRL
+	LDA #>oam
+	STA PPU::OAMDMA
+	LDA #$00
+	STA oam_index
+
+	; Use loopy technique to set scroll for the next frame
+compute_scroll:
+	; PPU::ADDR = nametable_id << 2
+	LDA soft_ppuctrl
+	AND #%00000011
+	ASL
+	ASL
+	STA PPU::ADDR
+	; PPU::SCROLL = scroll_y
+	LDA soft_scroll_y
+	STA PPU::SCROLL
+	; PPU::SCROLL = scroll_x
+	; This is delayed until hblank
+	LDX soft_scroll_x
+	; PPU::ADDR = ((scroll_y & $F8) << 2) | (scroll_x >> 3)
+	; This is delayed until hblank
+	LDA soft_scroll_y
+	AND #%11111000
+	ASL
+	ASL
+	STA scroll_temp
+	LDA soft_scroll_x
+	LSR
+	LSR
+	LSR
+	ORA scroll_temp
+
+	; Delay until the following code executes within hblank
+delay:
+
+	; Commit final scroll state, enable rendering
+enable_rendering:
+	LDY soft_ppumask
+	STX PPU::SCROLL
+	STA PPU::ADDR
+	STY PPU::MASK
+
+	; Indicate that NMI has not yet occurred this frame
+clear_nmi_serviced:
+	LDA #$00
+	STA nmi_serviced
+
+set_irq_vector:
+	LDA #<irq_begin_extended_vblank
+	STA soft_irq_vector + 0
+	LDA #>irq_begin_extended_vblank
+	STA soft_irq_vector + 1
+
+restore_registers:
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+
+	RTI
 .ENDPROC
 
 
@@ -2620,11 +3074,11 @@ right_edge_mask_table:
 
 ; TODO: Need to rename these, they're multiplication tables for indexing into the screen buffer
 screen_lo:
-.REPEAT SCREEN_HEIGHT_TILES, i
+.REPEAT ::SCREEN_HEIGHT_TILES, i
 	.LOBYTES	SCREEN_WIDTH_TILES * i
 .ENDREP
 screen_hi:
-.REPEAT	SCREEN_HEIGHT_TILES, i
+.REPEAT	::SCREEN_HEIGHT_TILES, i
 	.HIBYTES	SCREEN_WIDTH_TILES * i
 .ENDREP
 
@@ -2632,15 +3086,15 @@ screen_hi:
 ; TODO: Give credit/ask permission
 .REPEAT	8, i
 	.ident(.sprintf("color_table_%d", i)):
-	.LOBYTES	%0000000000000000 >> i
-	.LOBYTES	%0001000000010000 >> i
-	.LOBYTES	%0011000000110000 >> i
-	.LOBYTES	%0111000001110000 >> i
-	.LOBYTES	%1111000011110000 >> i
-	.LOBYTES	%1111000111110001 >> i
-	.LOBYTES	%1111001111110011 >> i
-	.LOBYTES	%1111011111110111 >> i
-	.LOBYTES	%1111111111111111 >> i
+	.LOBYTES	%00000000000000000000000000000000 >> (i * 3)
+	.LOBYTES	%00010000000100000001000000010000 >> (i * 3)
+	.LOBYTES	%00110000001100000011000000110000 >> (i * 3)
+	.LOBYTES	%01110000011100000111000001110000 >> (i * 3)
+	.LOBYTES	%11110000111100001111000011110000 >> (i * 3)
+	.LOBYTES	%11110001111100011111000111110001 >> (i * 3)
+	.LOBYTES	%11110011111100111111001111110011 >> (i * 3)
+	.LOBYTES	%11110111111101111111011111110111 >> (i * 3)
+	.LOBYTES	%11111111111111111111111111111111 >> (i * 3)
 .ENDREP
 
 ; Cube model

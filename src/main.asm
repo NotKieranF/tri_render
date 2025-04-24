@@ -21,6 +21,7 @@ CAMERA_MOV_SPEED	= $0008
 
 .SEGMENT	"SAVERAM"
 pal_buffer:				.RES 32
+temp:					.RES 1
 
 
 
@@ -28,13 +29,17 @@ pal_buffer:				.RES 32
 
 .CODE
 .PROC main
-	; Disable rendering, enable NMIs
-	LDA #PPU::DISABLE_RENDERING
+	; Initialize nmi vector and rendering parameters
+	LDA #<nmi_render
+	STA soft_nmi_vector + 0
+	LDA #>nmi_render
+	STA soft_nmi_vector + 1
+
+	LDA #PPU::MASK::RENDER_SP | PPU::MASK::RENDER_BG
 	STA soft_ppumask
-	LDA #PPU::DEFAULT_CTRL
+	LDA #PPU::CTRL::ENABLE_NMI | PPU::CTRL::BG_PATTERN_L | PPU::CTRL::SP_PATTERN_R
 	STA soft_ppuctrl
 	STA PPU::CTRL
-	JSR wait_for_nmi
 
 	; Load initial palette
 init_pal:
@@ -50,22 +55,86 @@ init_pal:
 	CPX #$20
 	BNE :-
 
-	; Load initial tile data
-init_pattern:
-	LDA #$10
-	STA PPU::ADDR
-	LDA #$00
-	STA PPU::ADDR
-
+copy_polygon:
 	LDX #$00
-:	LDA balz, X
-	STA PPU::DATA
+:	LDA test_poly, X
+	STA display_list_polys, X
 	INX
+	CPX #test_poly_end - test_poly
 	BNE :-
+	LDA #<display_list_polys
+	STA display_list_ptrs_lo + 0
+	LDA #>display_list_polys
+	STA display_list_ptrs_hi + 0
 
-	; Enable sprite rendering
-	LDA #PPU::RENDER_SP
-	STA soft_ppumask
+
+	LDA #$02
+	STA temp
+
+	JSR init_transfer_coroutine
+
+	LDA #$00
+.REPEAT 8, i
+	STA .ident(.sprintf("pattern_buffer_%d", i))
+.ENDREP
+
+forever:
+	LDX temp
+	LDA buttons_held
+	AND #BUTTON_UP
+	BEQ :+
+		DEC display_list_polys + 1, X
+:	LDA buttons_held
+	AND #BUTTON_DOWN
+	BEQ :+
+		INC display_list_polys + 1, X
+:	LDA buttons_held
+	AND #BUTTON_LEFT
+	BEQ :+
+		DEC display_list_polys + 0, X
+:	LDA buttons_held
+	AND #BUTTON_RIGHT
+	BEQ :+
+		INC display_list_polys + 0, X
+:	LDA buttons_down
+	AND #BUTTON_A
+	BEQ :++
+		LDA temp
+		CLC
+		ADC #$02
+		CMP display_list_polys + 0
+		BCC :+
+			LDA #$02
+	:	STA temp
+:	LDA buttons_down
+	AND #BUTTON_B
+	BEQ :++
+		LDA temp
+		SEC
+		SBC #$02
+		CMP #$02
+		BCS :+
+			LDA display_list_polys + 0
+			SBC #$00
+	:	STA temp
+:	LDA buttons_down
+	AND #BUTTON_SELECT
+	BEQ :+
+		INC display_list_polys + 1
+:	LDA buttons_down
+	AND #BUTTON_START
+	BEQ :+
+		DEC display_list_polys + 1
+:
+
+	; Setup poly pointer
+	LDA #$01
+	STA display_list_size
+
+	JSR render_frame
+	JSR read_controller
+	JMP forever
+
 
 	JSR math_init
 main_loop:
@@ -244,8 +313,15 @@ main_loop:
 :	RTS
 .ENDPROC
 
-
-
+test_poly:
+.BYTE	$0B
+.BYTE	$08
+.BYTE	$80, $40
+.BYTE	$C0, $80
+.BYTE	$80, $C0
+.BYTE	$40, $80
+.BYTE	$20, $60
+test_poly_end:
 
 .RODATA
 default_pal:

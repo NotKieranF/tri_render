@@ -4,6 +4,9 @@ NMI_H = 1
 ; 6502 nmi vector
 .GLOBAL		nmi
 
+;
+.GLOBALZP	soft_nmi_vector
+
 ; Indicate that a logical frame is done, and wait for the next nmi before returning
 ;	Takes: Nothing
 ;	Returns: Nothing

@@ -1,11 +1,12 @@
 ; NMI handler
 .INCLUDE	"nmi.h"
-.INCLUDE	"nes.h"
-.INCLUDE	"irq.h"
+
+
 
 
 
 .ZEROPAGE
+soft_nmi_vector:	.RES 2
 soft_ppuctrl:		.RES 1	; Soft registers to be copied during vblank
 soft_ppumask:		.RES 1
 soft_scroll_x:		.RES 1
@@ -16,8 +17,12 @@ oam_index:			.RES 1
 
 
 
+
+
 .SEGMENT	"OAM"
 oam:				.RES 256
+
+
 
 
 
@@ -26,48 +31,12 @@ gfx_buffer:			.RES 160
 
 
 
+
+
 .CODE
+; Actual NMI handler is mostly dummied out
 .PROC	nmi
-	PHA
-	TXA
-	PHA
-	TYA
-	PHA
-
-check_frame_done_flag:
-	LDA frame_done_flag
-	BEQ no_gfx_update
-
-write_registers:
-	LDA soft_ppuctrl
-	STA PPU::CTRL
-	LDA soft_ppumask
-	STA PPU::MASK
-	LDA soft_scroll_x
-	STA PPU::SCROLL
-	LDA soft_scroll_y
-	STA PPU::SCROLL
-	LDA #>oam
-	STA PPU::OAMDMA
-	LDA #$00
-	STA oam_index
-
-clear_frame_done_flag:
-	LDA #$00
-	STA frame_done_flag
-
-; All timing sensitive updates have been performed, enable interrupts
-no_gfx_update:
-	CLI
-
-restore_registers:
-	PLA
-	TAY
-	PLA
-	TAX
-	PLA
-
-	RTI
+	JMP (soft_nmi_vector)
 .ENDPROC
 
 ; Indicate that a logical frame is done, and wait for the next nmi before returning

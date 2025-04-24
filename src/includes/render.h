@@ -70,10 +70,11 @@ NEAR_PLANE					= $0100
 ; Routines
 .GLOBAL		plot_point
 .GLOBAL		render_frame
+.GLOBAL		init_transfer_coroutine, nmi_render
 
 ; For testing
-.GLOBAL		draw_line, rasterize_poly, opaque_tile_indices, nametable_buffer
-.GLOBALZP	next_opaque_pattern_index, next_partial_pattern_index
+.GLOBAL		draw_line, rasterize_poly, opaque_tile_indices, nametable_buffer, display_list_polys, display_list_ptrs_lo, display_list_ptrs_hi
+.GLOBALZP	display_list_size, opaque_pattern_write_head, partial_pattern_write_head, last_opaque_pattern_index, last_partial_pattern_index, graphics_buffers_full, graphics_buffers_empty, nametable_buffer_ppu_addr, partial_buffer_ppu_addr, opaque_buffer_ppu_addr
 
 .REPEAT	8, i
 	.GLOBAL	.ident(.sprintf("pattern_buffer_%d", i))
