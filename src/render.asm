@@ -380,9 +380,10 @@ clear_nametable_buffer:
 	; Ensure that the transfer thread has consumed the opaque tile buffer before touching it during rasterization
 check_opaque_buffer_empty:
 :	LDA transfer_coroutine_progress
-	CMP #TRANSFER_STATES::DONE	; TODO: implement concurrent consumption/production, change this to ::TRANSFERRING_PARTIAL
+	CMP #TRANSFER_STATES::TRANSFERRING_PARTIAL
 	BCC :-
 
+	; Display list is drawn front to back
 draw_display_list:
 	LDX display_list_size
 	BEQ @break
@@ -2400,6 +2401,8 @@ exit:
 	:	; If existing tile is blank, we must allocate a new one
 	@allocate_new_tile:
 		LAX partial_pattern_write_head
+	:	CMP partial_pattern_read_head
+		BCS :-
 		INC partial_pattern_write_head
 		STA (nametable_ptr), Y
 
@@ -2581,10 +2584,13 @@ init_pattern_buffer_address:
 init_pattern_indices:
 	LDA partial_pattern_write_head
 	STA last_partial_pattern_index
+
 	LDX opaque_pattern_write_head
 	INX								; Write head points to the next opaque tile to be allocated, needs to be adjusted
 	STX last_opaque_pattern_index
 
+	LDA #$00
+	STA partial_pattern_read_head
 
 	; Transfer nametable_buffer
 transfer_nametable_buffer:
@@ -2681,6 +2687,9 @@ transfer_partial_buffer:
 	CPX last_partial_pattern_index
 	BCC @loop
 	INC transfer_coroutine_progress
+	; Indiate that partial pattern buffer is fully consumed
+	LDA #$FF
+	STA partial_pattern_read_head
 
 	; Swap active buffers now that we've finished transferring everything
 	; TODO: make this more general
@@ -2727,6 +2736,7 @@ exit:
 
 	LDA #$FF
 	STA transfer_coroutine_progress
+	STA partial_pattern_read_head
 
 	CLI
 	RTS
