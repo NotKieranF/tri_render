@@ -1,5 +1,6 @@
 ; (c) Kieran Firkin
 ; TODO: Credits (poly render nesdev thread, c-hacking math, elite website), Proper License
+.INCLUDE	"call65.inc"
 .INCLUDE	"nes.h"
 .INCLUDE	"render.h"
 .INCLUDE	"irq.h"
@@ -7,6 +8,8 @@
 .INCLUDE	"math.h"
 .INCLUDE	"objects.h"
 .INCLUDE	"vrc6.h"
+.DECLAREROUTINE	render_frame render_objects clear_buffers rasterize_display_list rasterize_poly sort_display_list project_point
+.DECLAREROUTINE	transform_point_combined_matrix render_object render_poly setup_rot_matrix
 
 ; Overview of rendering pipeline:
 ;	* 
@@ -301,8 +304,9 @@ nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
 ; Renders a frame of the 3D scene
 ;	Takes: Nothing
 ;	Returns: Nothing
-;	Clobbers: A, X, Y, $00 - $1F
-.PROC	render_frame
+;	Clobbers: A, X, Y
+.ROUTINE	render_frame
+	.CALLS	render_objects clear_buffers rasterize_display_list
 ;	JSR render_objects
 ;	JSR sort_display_list
 	JSR clear_buffers
@@ -310,21 +314,21 @@ nametable_buffer:				.RES SCREEN_WIDTH_TILES * SCREEN_HEIGHT_TILES
 
 exit:
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ;
 ;
 ;
 ;
-.PROC	render_objects
+.ROUTINE	render_objects
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Clears nametable and pattern table graphics buffers
 ;	Takes: Nothing
 ;	Returns: Nothing
 ;	Clobbers: A, X
-.PROC	clear_buffers
+.ROUTINE	clear_buffers
 	; Ensure that transfer thread has at least begun consuming the previous frame's buffers
 :	LDA graphics_buffers_full
 	BNE :-
@@ -364,14 +368,14 @@ clear_nametable_buffer:
 	BNE @loop
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Calls rasterize_poly for each polygon struct pointer in the display list
 ;	Takes: Number of polygons to rasterize in display_list_size, pointers to polygon structs in display_list_ptrs_lo/hi
 ;	Returns: Nothing
-;	Clobbers: A, X, Y, $00 - $1F
-.PROC	rasterize_display_list
-	poly_ptr					:= $00	; And $01
+;	Clobbers: A, X, Y
+.ROUTINE	rasterize_display_list
+	.CALLS rasterize_poly
 
 	; Ensure that the transfer thread has consumed the opaque tile buffer before touching it during rasterization
 check_opaque_buffer_empty:
@@ -384,9 +388,9 @@ draw_display_list:
 	BEQ @break
 @loop:
 	LDA display_list_ptrs_lo - 1, X
-	STA poly_ptr + 0
+	STA z:rasterize_poly::poly_ptr + 0
 	LDA display_list_ptrs_hi - 1, X
-	STA poly_ptr + 1
+	STA z:rasterize_poly::poly_ptr + 1
 
 	JSR rasterize_poly
 
@@ -401,17 +405,17 @@ exit:
 	STA graphics_buffers_full
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ;
 ;	Takes: Signed 16-bit cameraspace vertex coordinates in vertex_x, vertex_y, and vertex_z
 ;	Returns: Signed 16-bit projected vertex coordinates in vertex_x and vertex_y
-;	Clobbers: A, X, Y, $1A - $1F
-.PROC	project_point
-	vertex_x		:= $1A	; And $1B
-	vertex_y		:= $1C	; And $1D
-	vertex_z		:= $1E	; And $1F
-	log_z			:= $1E
+;	Clobbers: A, X, Y
+.ROUTINE	project_point
+	.ALLOCATELOCAL	vertex_x, 2
+	.ALLOCATELOCAL	vertex_y, 2
+	.ALLOCATELOCAL	vertex_z, 2
+	.ALLOCATELOCAL	log_z
 
 check_z:
 	LDY #$00
@@ -530,19 +534,19 @@ shift_output:
 
 exit:
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Multiplies a point provided in
 ;	Takes: 7-bit signed input vector in $1A, $1B, $1C (x, y, z)
 ;	Returns: 7-bit signed output vector in $1D, $1E, $1F (x, y, z)
-;	Clobbers: A, Y, $1A - $1F
-.PROC	transform_point_combined_matrix
-	input_x			:= $1A
-	output_x		:= $1B
-	input_y			:= $1C
-	output_y		:= $1D
-	input_z			:= $1E
-	output_z		:= $1F
+;	Clobbers: A, Y
+.ROUTINE	transform_point_combined_matrix
+	.ALLOCATELOCAL	input_x
+	.ALLOCATELOCAL	output_x
+	.ALLOCATELOCAL	input_y
+	.ALLOCATELOCAL	output_y
+	.ALLOCATELOCAL	input_z
+	.ALLOCATELOCAL	output_z
 
 column_x:
 	LDA input_x
@@ -615,7 +619,7 @@ column_z:
 
 exit:
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ;
 ;
@@ -646,23 +650,25 @@ clip_bottom:
 ;
 ;
 ;
-.PROC	render_object
-	object_pos_sub			:= $00	; And $01, $02. Stored in X, Y, Z order
-	object_pos_lo			:= $03	; And $04, $05. Stored in X, Y, Z order
-	object_pos_hi			:= $06	; And $07, $08. Stored in X, Y, Z order
-	mesh_rel_pos_lo			:= $00	; And $01, $02. Stored in X, Y, Z order
-	mesh_rel_pos_hi			:= $03	; And $04, $05. Stored in X, Y, Z order
-	mesh_cameraspace_x		:= $06	; And $07
-	mesh_cameraspace_y		:= $08	; And $09
-	mesh_cameraspace_z		:= $0A	; And $0B
-	loop_count				:= $0C
-	mesh_ptr				:= $0D	; And $0E. Points to mesh data
-	mesh_num_polys			:= $0F
-	mesh_vertices_x_ptr		:= $00	; And $01. Points to list of vertex X components
-	mesh_vertices_y_ptr		:= $02	; And $03. Points to list of vertex Y components
-	mesh_vertices_z_ptr		:= $04	; And $05. Points to list of vertex Z components
-	mesh_poly_ptr			:= $10	; And $11. Points to list of polygons
-;	poly_num_vertices		:= $15	
+.ROUTINE	render_object
+	.CALLS	render_poly project_point
+	.ALLOCATELOCAL	object_pos_sub, 3	; Stored in X, Y, Z order
+	.ALLOCATELOCAL	object_pos_lo, 3	; Stored in X, Y, Z order
+	.ALLOCATELOCAL	object_pos_hi, 3	; Stored in X, Y, Z order
+	mesh_rel_pos_lo := object_pos_sub
+	mesh_rel_pos_hi := object_pos_hi
+;	.ALLOCATELOCAL	mesh_rel_pos_lo, 3	; Stored in X, Y, Z order
+;	.ALLOCATELOCAL	mesh_rel_pos_hi, 3	; Stored in X, Y, Z order
+	.ALLOCATELOCAL	mesh_cameraspace_x, 2
+	.ALLOCATELOCAL	mesh_cameraspace_y, 2
+	.ALLOCATELOCAL	mesh_cameraspace_z, 2
+	.ALLOCATELOCAL	loop_count
+	.ALLOCATELOCAL	mesh_ptr, 2
+	.ALLOCATELOCAL	mesh_num_polys
+	.ALLOCATELOCAL	mesh_vertices_x_ptr, 2
+	.ALLOCATELOCAL	mesh_vertices_y_ptr, 2
+	.ALLOCATELOCAL	mesh_vertices_z_ptr, 2
+	.ALLOCATELOCAL	mesh_poly_ptr, 2	
 
 	LDA object_pos_x_sub, X
 	STA object_pos_sub + 0
@@ -879,7 +885,7 @@ draw_origin:
 @skip:
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ;
 ;	Takes:
@@ -929,17 +935,18 @@ draw_origin:
 ;	slope = ydiff / xdiff
 ;	y1 + slope * (x - x1)
 ;
-.PROC	render_poly
-	prev_vertex		:= $14
-	cur_vertex		:= $15
-	poly_index		:= $16
-	num_vertices	:= $17
-	cur_parity		:= $18
-	prev_parity		:= $19
-	x_diff			:= $1A
-	interpolated_x	:= $1B	; And $1C
-	y_diff			:= $1D
-	interpolated_y	:= $1E	; And $1F
+.ROUTINE	render_poly
+	.CALLS transform_point_combined_matrix project_point
+	.ALLOCATELOCAL	prev_vertex
+	.ALLOCATELOCAL	cur_vertex
+	.ALLOCATELOCAL	poly_index
+	.ALLOCATELOCAL	num_vertices
+	.ALLOCATELOCAL	cur_parity
+	.ALLOCATELOCAL	prev_parity
+	.ALLOCATELOCAL	x_diff
+	.ALLOCATELOCAL	interpolated_x, 2
+	.ALLOCATELOCAL	y_diff
+	.ALLOCATELOCAL	interpolated_y, 2
 
 	INSIDE			= $01
 	OUTSIDE			= $00
@@ -1319,20 +1326,19 @@ temp_test:
 	BNE @loop
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Sets up a rotation matrix based on Tait-Bryan angles provided
 ;	Takes: Yaw in X, pitch in Y, roll in A
 ;	Returns: Rotation matrix in object_matrix
-;	Clobbers: A, X, Y, $1B - $1F
+;	Clobbers: A, X, Y
 ;	~411 cycles
-.PROC	setup_rot_matrix
-yaw			:= $1B		; Tait-Bryan angles
-pitch		:= $1C
-roll		:= $1D
-
-y_plus_p	:= $1E		; Common angle calculations
-y_minus_p	:= $1F
+.ROUTINE	setup_rot_matrix
+	.ALLOCATELOCAL	yaw
+	.ALLOCATELOCAL	pitch
+	.ALLOCATELOCAL	roll
+	.ALLOCATELOCAL	y_plus_p
+	.ALLOCATELOCAL	y_minus_p
 
 	STX yaw
 	STY pitch
@@ -1641,14 +1647,14 @@ compute_yy_yz:
 
 	STA $4400
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Premultiplies object_matrix by camera_matrix and stores the result in combined_matrix
 ;	Could do with its own multiplication routine, as its precision requirements are unique
 ;	Could proooobably massage it to loop 9 times instead of 3 to reduce code size, but matrix math is melting my brain so not today. 
 ;	Plus it would increase run time by a fair bit, 3 extra zeropage loads per iteration-ish I think.
 ;	Clobbers: A, X, Y, $1F
-.PROC	matrix_multiply
+.ROUTINE	matrix_multiply
 
 loop:
 	LDA camera_matrix + ROT_MATRIX::XX, X
@@ -1715,13 +1721,13 @@ loop:
 :
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Sorts display_list_indices from nearest to farthest
 ;	Requires display_list_indices to be in zp
-;	Clobbers: A, X, Y, $1F
-.PROC	sort_display_list
-	outer_loop_count	:= $1F
+;	Clobbers: A, X, Y
+.ROUTINE	sort_display_list
+	.ALLOCATELOCAL	outer_loop_count
 
 	LDA display_list_size
 	STA outer_loop_count
@@ -1756,47 +1762,47 @@ check_outer:
 
 exit:
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Rasterizes a single polygon to nametable_buffer and pattern_buffer. Vertices should be stored in clockwise order, sorted such that the topmost vertex is first,
 ; preferring the leftmost vertex if ambiguous.
-;	Takes: Pointer to screenspace polygon struct in $00 - $01
+;	Takes: Pointer to screenspace polygon struct in poly_ptr
 ;	Returns: Nothing
-;	Clobbers: A, X, Y, $00 - $1F
-.PROC	rasterize_poly
+;	Clobbers: A, X, Y
+.ROUTINE	rasterize_poly
 	TILE_MASK					= %11111000
 	PIXEL_MASK					= %00000111
 
-	poly_ptr					:= $00	; And $01
-	left_index					:= $02
-	right_index					:= $03
-	poly_color					:= $04
-	leftmost_pixel				:= $05
-	rightmost_pixel				:= $06
-	tile_row					:= $07
+	.ALLOCATELOCAL	poly_ptr, 2
+	.ALLOCATELOCAL	left_index
+	.ALLOCATELOCAL	right_index
+	.ALLOCATELOCAL	poly_color
+	.ALLOCATELOCAL	leftmost_pixel
+	.ALLOCATELOCAL	rightmost_pixel
+	.ALLOCATELOCAL	tile_row
 
 	; Bresenham state for edge stepping
-	bres_current_x_l			:= $08
-	bres_current_x_r			:= $09
-	bres_current_y_l			:= $0A
-	bres_current_y_r			:= $0B
-	bres_target_x_l				:= $0C
-	bres_target_x_r				:= $0D
-	bres_target_y_l				:= $0E
-	bres_target_y_r				:= $0F
-	bres_target_y_relative_l	:= $10
-	bres_target_y_relative_r	:= $11
-	bres_routine_ptr_l			:= $12	; And $13
-	bres_routine_ptr_r			:= $14	; And $15
-	bres_slope_l				:= $16
-	bres_slope_r				:= $17
-	bres_residual_l				:= $18
-	bres_residual_r				:= $19
+	.ALLOCATELOCAL	bres_current_x_l
+	.ALLOCATELOCAL	bres_current_x_r
+	.ALLOCATELOCAL	bres_current_y_l
+	.ALLOCATELOCAL	bres_current_y_r
+	.ALLOCATELOCAL	bres_target_x_l
+	.ALLOCATELOCAL	bres_target_x_r
+	.ALLOCATELOCAL	bres_target_y_l
+	.ALLOCATELOCAL	bres_target_y_r
+	.ALLOCATELOCAL	bres_target_y_relative_l
+	.ALLOCATELOCAL	bres_target_y_relative_r
+	.ALLOCATELOCAL	bres_routine_ptr_l, 2
+	.ALLOCATELOCAL	bres_routine_ptr_r, 2
+	.ALLOCATELOCAL	bres_slope_l
+	.ALLOCATELOCAL	bres_slope_r
+	.ALLOCATELOCAL	bres_residual_l
+	.ALLOCATELOCAL	bres_residual_r
 
 	; Pointers for rasterizing tile rows
-	right_edge_mask_ptr			:= $1A	; And $1B
-	left_edge_mask_ptr			:= $1C	; And $1D
-	nametable_ptr				:= $1E	; And $1F
+	.ALLOCATELOCAL	right_edge_mask_ptr, 2
+	.ALLOCATELOCAL	left_edge_mask_ptr, 2
+	.ALLOCATELOCAL	nametable_ptr, 2
 
 	LDY #$00
 get_size:
@@ -1980,10 +1986,10 @@ exit:
 	;		leaves it pointing at the final byte of the next vertex in counterclockwise order
 	;	Takes:
 	;	Returns:
-	;	Clobbers: A, X, Y, $1E - $1F
+	;	Clobbers: A, X, Y
 	.PROC	read_vertex_left
-		routine_index		:= $1F
-		dy					:= $1E
+		routine_index		:= nametable_ptr + 0
+		dy					:= nametable_ptr + 1
 
 		STX bres_current_y_l
 		STY bres_current_x_l
@@ -2146,10 +2152,10 @@ exit:
 	;		and leaves it pointing at the last byte of the current vertex
 	;	Takes: Current X position in Y, current Y position in X
 	;	Returns: C = 1 if next vertex is higher than current vertex
-	;	Clobbers: A, X, Y, $1E - $1F
+	;	Clobbers: A, X, Y
 	.PROC	read_vertex_right
-		routine_index		:= $1F
-		dx					:= $1E
+		routine_index		:= nametable_ptr + 0
+		dx					:= nametable_ptr + 1
 
 		STX bres_current_y_r
 		STY bres_current_x_r
@@ -2442,6 +2448,7 @@ exit:
 		BNE @update_existing_tile
 		; If existing tile is blank, all we need to do is update the nametable buffer
 	@allocate_new_tile:
+		; TODO: This could probably be pulled out of the loop
 		LDX poly_color
 		LDA opaque_tile_indices, X
 		; If the current color already has an entry in opaque_tile_indices, we can write that to the nametable buffer
@@ -2503,12 +2510,12 @@ exit:
 	.REPEAT	32, i
 		.LOBYTES (i << 3) ^ $FF
 	.ENDREP
-.ENDPROC
+.ENDROUTINE
 
 ; Plots a point on the screen
 ;	Takes: X position in A, and Y position in Y
 ;	Clobbers: A, X, Y
-.PROC	plot_point
+.ROUTINE	plot_point
 	LDY oam_index
 
 	STA oam + OAM::Y_POS, Y
@@ -2527,7 +2534,7 @@ exit:
 	STY oam_index
 
 	RTS
-.ENDPROC
+.ENDROUTINE
 
 ; Coroutine for transferring data from CPU graphics buffers to the PPU. 
 ; Should be called with the interrupt inhibit flag set, which it will periodically toggle to check for a pending shutdown interrupt
